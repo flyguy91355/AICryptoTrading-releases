@@ -149,7 +149,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
 .asset-stat-label { font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
 .asset-stat-value { font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
-.asset-chart-box { height: 56px; border-radius: 6px; overflow: hidden; background: var(--bg-card); border: 1px solid var(--border); }
+.asset-chart-box { height: 120px; border-radius: 6px; overflow: hidden; background: var(--bg-card); border: 1px solid var(--border); }
 .asset-thesis { font-size: 11px; color: var(--text-secondary); line-height: 1.45; max-height: 46px; overflow: hidden; }
 
 .sell-btn { align-self: flex-start; background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border);
@@ -363,43 +363,84 @@ function fmtTime(iso) {
   return d.toLocaleString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 }
 
-// Mounts a small area-series sparkline, matching AITrading's own renderLightweightChart
-// helper in spirit (same library, same disposal-before-recreate pattern to avoid leaking
-// a chart instance per container on repeated re-renders) but scoped down to exactly what
-// these cards need -- one line, no crosshair/axis chrome, colored by the asset's own P/L
-// sign since that's more informative here than a fixed accent color.
-function renderSparkline(containerId, points, color) {
+// Mini candlestick chart for the asset cards — real candles + SMA50/SMA200 overlays +
+// support/resistance price lines. Matches the popup chart's visual language at card
+// scale. No volume, no crosshair, no axis labels to stay clean and uncluttered.
+// Same disposal-before-recreate pattern as the detailed chart.
+function renderCardChart(containerId, points, technicals) {
   const el = document.getElementById(containerId);
   if (!el || typeof LightweightCharts === 'undefined') return;
   if (chartInstances[containerId]) {
     chartInstances[containerId].remove();
     delete chartInstances[containerId];
   }
-  if (!points || points.length < 2) return;
+  if (!points || points.length < 3) return;
+
+  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
   const chart = LightweightCharts.createChart(el, {
     width: el.clientWidth, height: el.clientHeight,
     layout: { background: { color: 'transparent' }, textColor: 'transparent' },
-    grid: { vertLines: { visible: false }, horzLines: { visible: false } },
-    rightPriceScale: { visible: false }, timeScale: { visible: false },
+    grid: { vertLines: { color: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' },
+            horzLines: { color: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' } },
+    rightPriceScale: { visible: false },
+    timeScale: { visible: false },
     crosshair: { horzLine: { visible: false }, vertLine: { visible: false } },
     handleScroll: false, handleScale: false,
   });
-  const series = chart.addAreaSeries({
-    lineColor: color, lineWidth: 2, topColor: color + '33', bottomColor: color + '00',
-    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#10b981', downColor: '#ef4444',
+    borderVisible: false,
+    wickUpColor: '#10b981', wickDownColor: '#ef4444',
+    priceLineVisible: false, lastValueVisible: false,
   });
-  series.setData(points);
+  candleSeries.setData(points.map(p => ({
+    time: p.time, open: p.open, high: p.high, low: p.low, close: p.close,
+  })));
+
+  // SMA50 (amber) + SMA200 (purple) — same colors as the popup chart
+  const sma50 = rollingSma(points, 50);
+  if (sma50.length) {
+    chart.addLineSeries({
+      color: '#f59e0b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    }).setData(sma50);
+  }
+  const sma200 = rollingSma(points, 200);
+  if (sma200.length) {
+    chart.addLineSeries({
+      color: '#8b5cf6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+    }).setData(sma200);
+  }
+
+  // Support / resistance thin dashed lines if the technicals carry them
+  if (technicals) {
+    const last = points[points.length - 1].close;
+    const priceLine = (price, color) => {
+      if (!price || price <= 0) return;
+      candleSeries.createPriceLine({
+        price, color, lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: false, title: '',
+      });
+    };
+    if (technicals.support_level && technicals.support_level < last)
+      priceLine(technicals.support_level, '#3b82f6');
+    if (technicals.resistance_level && technicals.resistance_level > last)
+      priceLine(technicals.resistance_level, '#8b5cf6');
+  }
+
   chart.timeScale().fitContent();
   chartInstances[containerId] = chart;
 }
 
-async function loadAssetSparkline(ticker, containerId, color) {
+async function loadCardChart(ticker, containerId) {
   try {
-    const resp = await fetch(`/api/asset-history/${encodeURIComponent(ticker)}`);
+    // 1y matches the popup chart's own history window — needed for SMA200 (requires
+    // 200+ data points) to render and for the chart to show meaningful trend context.
+    const resp = await fetch(`/api/asset-history/${encodeURIComponent(ticker)}?period=1y`);
     const data = await resp.json();
-    const points = (data.points || []).map(p => ({ time: p.time, value: p.value }));
-    renderSparkline(containerId, points, color);
-  } catch (e) { console.error('loadAssetSparkline:', ticker, e); }
+    renderCardChart(containerId, data.points || [], data.technicals || null);
+  } catch (e) { console.error('loadCardChart:', ticker, e); }
 }
 
 // Simple rolling close-price average, computed client-side from the same OHLC
@@ -626,8 +667,7 @@ function updatePortfolio(p) {
   }).join('');
   p.positions.forEach(pos => {
     const chartId = 'posChart-' + pos.ticker.replace('/', '');
-    const color = pos.lifetime_pnl >= 0 ? '#10b981' : '#ef4444';
-    loadAssetSparkline(pos.ticker, chartId, color);
+    loadCardChart(pos.ticker, chartId);
   });
 }
 
@@ -674,7 +714,7 @@ function updateUniverse(reports) {
   }).join('');
   rows.forEach(r => {
     const chartId = 'uniChart-' + r.ticker.replace('/', '');
-    loadAssetSparkline(r.ticker, chartId, '#3b82f6');
+    loadCardChart(r.ticker, chartId);
   });
 }
 

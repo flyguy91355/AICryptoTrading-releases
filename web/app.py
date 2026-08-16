@@ -33,6 +33,7 @@ from src.utils.config import load_config, update_settings_yaml
 from src.update.version import read_local_version, write_local_version, is_newer
 from src.update.release_client import fetch_latest_release
 from src.update.apply import extract_release_archive, copy_updatable_files, requirements_changed
+from src.research.event_triggers import check_event_triggers, compute_rsi_from_buffer
 from src.data.market_data import MarketDataFetcher
 from src.data.news_feed import NewsFeed
 from src.research.engine import ResearchEngine
@@ -60,13 +61,23 @@ class DashboardState:
         self.order_manager = OrderManager(self.config, self.portfolio)
 
         self.universe: list[dict] = self.config.get("universe", [])
-        self.latest_reports: dict[str, dict] = {}  # ticker -> serialized ResearchReport
         self.websockets: list[WebSocket] = []
+
+        # latest_reports persistence -- same restart-survival pattern as ai_log.
+        # Each serialized report is a plain JSON-safe dict so a flat JSON file works.
+        self._reports_cache_path = "data/latest_reports_cache.json"
+        self.latest_reports: dict[str, dict] = self._load_reports_cache()
         self._market_tz = ZoneInfo(self.config.get("research", {}).get("market_timezone", "America/New_York"))
         self._scan_in_progress = False
         self._apply_update_in_progress: bool = False
         self._update_status_cache: dict | None = None
         self._update_status_cache_time: datetime | None = None
+
+        # Event-triggered scanning state -- in-memory only (losing a 60-min cooldown
+        # on a restart is a minor cost vs. the complexity of persisting these).
+        self._event_price_buffers: dict[str, list[float]] = {}   # rolling prices for RSI
+        self._event_last_prices: dict[str, float] = {}           # price from previous tick
+        self._event_claude_cooldown: dict[str, datetime] = {}    # per-ticker cooldown
 
         # AI log persistence (2026-08-16, owner report: "the ai research engine is not
         # keeping the history") -- self.ai_log was purely in-memory, so it reset to
@@ -83,6 +94,20 @@ class DashboardState:
 
     def _now_et(self) -> datetime:
         return datetime.now(self._market_tz)
+
+    def _load_reports_cache(self) -> dict:
+        try:
+            return json.loads(Path(self._reports_cache_path).read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _save_reports_cache(self):
+        try:
+            Path(self._reports_cache_path).write_text(
+                json.dumps(self.latest_reports, default=str), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning("Could not save reports cache: %s", e)
 
     def _init_log_db(self):
         import sqlite3
@@ -229,6 +254,7 @@ class DashboardState:
         the two submission mechanisms can't drift in what counts as a qualifying
         signal."""
         self.latest_reports[ticker] = self._serialize_report(report)
+        asyncio.create_task(asyncio.to_thread(self._save_reports_cache))
 
         if report.is_fallback:
             self.add_log(ticker, f"Analysis failed — {report.thesis}", "ERROR")
@@ -442,6 +468,97 @@ class DashboardState:
                 logger.exception("asset_profile_refresh_loop: unhandled error")
             await asyncio.sleep(24 * 3600)
 
+    async def event_scan_loop(self):
+        """Fast cheap loop: parallel quote fetches for all universe assets every few
+        minutes, real Claude call only when a genuine trigger fires AND the per-ticker
+        cooldown has expired. Fires after an initial delay equal to one interval so
+        the startup Batch scan runs first and the price buffers can begin filling.
+        Skipped entirely (returns without looping) when event_scan.enabled is False,
+        so toggling the setting live requires a restart to take effect -- acceptable
+        given this is a background loop."""
+        cfg = self.config.get("event_scan", {})
+        if not cfg.get("enabled", True):
+            self.add_log("SYSTEM", "Event scan disabled in config — event_scan_loop idle")
+            return
+        interval = cfg.get("interval_minutes", 3) * 60
+        await asyncio.sleep(interval)
+        while True:
+            try:
+                await self._run_event_scan()
+            except Exception:
+                logger.exception("event_scan_loop: unhandled error")
+            await asyncio.sleep(interval)
+
+    async def _run_event_scan(self):
+        """One event-scan tick: fetch quotes in parallel, update rolling price buffers,
+        check triggers for unowned assets, and fire a single-ticker Claude call if a
+        trigger fires and the cooldown allows."""
+        cfg = self.config.get("event_scan", {})
+        cooldown_mins = cfg.get("claude_cooldown_minutes", 60)
+        now = datetime.now()
+
+        tickers = [(a["ticker"], a["name"]) for a in self.universe]
+
+        # Parallel quote fetch -- the only I/O in the normal (no-trigger) fast path
+        raw = await asyncio.gather(
+            *[self.market_data.get_quote(t) for t, _ in tickers],
+            return_exceptions=True,
+        )
+
+        for (ticker, name), result in zip(tickers, raw):
+            if isinstance(result, Exception):
+                continue
+
+            price = result.price
+
+            # Maintain rolling buffer (max 30 prices) for RSI -- pure in-process math
+            buf = self._event_price_buffers.setdefault(ticker, [])
+            buf.append(price)
+            if len(buf) > 30:
+                buf.pop(0)
+
+            prev_price = self._event_last_prices.get(ticker)
+            self._event_last_prices[ticker] = price
+
+            # Held positions: position_loop handles all exit/monitoring logic
+            if ticker in self.portfolio.positions:
+                continue
+
+            # Skip if in per-ticker cooldown
+            cooldown_until = self._event_claude_cooldown.get(ticker)
+            if cooldown_until and now < cooldown_until:
+                continue
+
+            # Don't pile event calls on top of an already-running full scan
+            if self._scan_in_progress:
+                continue
+
+            rsi = compute_rsi_from_buffer(buf)
+            triggers = check_event_triggers(ticker, price, prev_price, rsi, cfg)
+            if not triggers:
+                continue
+
+            trigger_desc = ", ".join(triggers)
+            self.add_log(
+                ticker,
+                f"EVENT TRIGGER: {trigger_desc} (price ${price:.4f}) — running full analysis",
+                "WARNING",
+            )
+
+            try:
+                trade_history = await self.portfolio.get_trade_history_summary(ticker)
+                report = await self.research_engine.analyze_asset(ticker, name, trade_history)
+                await self._act_on_report(ticker, name, report)
+                # Broadcast the updated report so the dashboard card refreshes immediately
+                await self.broadcast({"type": "reports", "reports": self.latest_reports})
+            except Exception as e:
+                logger.exception("Event scan analysis failed for %s", ticker)
+                self.add_log(ticker, f"Event analysis error: {e}", "ERROR")
+
+            # Cooldown applies regardless of analysis outcome -- prevents re-firing
+            # on an unchanged condition between full scan cycles
+            self._event_claude_cooldown[ticker] = now + timedelta(minutes=cooldown_mins)
+
 
 state = DashboardState()
 _VERSION_FILE_PATH = str(Path(__file__).resolve().parent.parent / "VERSION")
@@ -540,6 +657,7 @@ async def startup():
     asyncio.create_task(state.position_loop())
     asyncio.create_task(state.heartbeat_loop())
     asyncio.create_task(state.asset_profile_refresh_loop())
+    asyncio.create_task(state.event_scan_loop())
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -585,6 +703,12 @@ _SETTINGS_FIELDS: dict[str, type] = {
     "research.ai_stop_loss_max_pct": float,
     "research.ai_final_trail_min_pct": float,
     "research.ai_final_trail_max_pct": float,
+    "event_scan.enabled": bool,
+    "event_scan.interval_minutes": int,
+    "event_scan.rsi_oversold": float,
+    "event_scan.price_dip_pct": float,
+    "event_scan.price_surge_pct": float,
+    "event_scan.claude_cooldown_minutes": int,
 }
 
 
