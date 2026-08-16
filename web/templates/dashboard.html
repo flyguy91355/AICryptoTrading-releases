@@ -213,16 +213,10 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
 .am-badge { padding: 4px 11px; border-radius: 6px; font-size: 12.5px; font-weight: 700; }
 .am-badge-plain { background: var(--bg-secondary); border: 1px solid var(--border); font-weight: 600; font-size: 12px; }
 .am-badge-time { margin-left: auto; color: var(--text-muted); font-size: 11px; font-weight: 500; }
-.asset-modal-chart-wrap { margin-bottom: 16px; position: relative; }
-.asset-modal-legend {
-  position: absolute; top: 6px; left: 8px; z-index: 2;
-  display: flex; flex-direction: column; gap: 3px;
-  font-size: 11px; color: var(--text-secondary);
-  background: rgba(0,0,0,0.45); border-radius: 5px; padding: 5px 8px;
-  pointer-events: none;
-}
-.asset-modal-legend span { display: flex; align-items: center; white-space: nowrap; }
-.asset-modal-legend span.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; flex-shrink: 0; }
+.asset-modal-chart-wrap { margin-bottom: 16px; }
+.asset-modal-legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--text-secondary);
+  margin-bottom: 6px; padding: 0 2px; }
+.asset-modal-legend span.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 .asset-modal-chart { height: 420px; border-radius: 8px; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border); }
 .asset-modal-section { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px;
   padding: 12px 13px; margin-bottom: 10px; }
@@ -549,11 +543,14 @@ function renderDetailedAssetChart(containerId, legendId, points, technicals, ref
     return v.toFixed(Math.max(2, -mag + 3));
   };
 
-  const priceLine = (price, color, title, lineStyle, showAxisLabel = true) => {
+  const priceLine = (price, color, title, lineStyle) => {
     if (price === null || price === undefined || price <= 0) return;
+    // axisLabelVisible: false on every price line — the legend above the chart already
+    // shows all labels/prices; keeping axis labels on was stacking 7+ labels on the right
+    // axis and crowding the auto-shown current-price label off screen.
     candleSeries.createPriceLine({
       price, color, lineWidth: 1, lineStyle: lineStyle ?? LightweightCharts.LineStyle.Dashed,
-      axisLabelVisible: showAxisLabel, title,
+      axisLabelVisible: false, title,
     });
     legend.push([color, `${title} $${fmtP(price)}`]);
   };
@@ -561,12 +558,11 @@ function renderDetailedAssetChart(containerId, legendId, points, technicals, ref
     priceLine(refLines.entry, '#3b82f6', 'Entry', LightweightCharts.LineStyle.Solid);
     priceLine(refLines.stop, '#ef4444', 'Stop', LightweightCharts.LineStyle.Solid);
     (refLines.takeProfits || []).forEach((tp, i) => priceLine(tp, '#10b981', `TP${i + 1}`));
-    priceLine(refLines.fairValue, '#06b6d4', 'Fair Value', undefined, false);
+    priceLine(refLines.fairValue, '#06b6d4', 'Fair Value');
   }
   if (technicals) {
-    // axisLabel off for support/resistance — shown in legend, not needed on the crowded right axis
-    priceLine(technicals.support_level, isDark ? '#6b7280' : '#9ca3af', 'Support', undefined, false);
-    priceLine(technicals.resistance_level, isDark ? '#6b7280' : '#9ca3af', 'Resistance', undefined, false);
+    priceLine(technicals.support_level, isDark ? '#6b7280' : '#9ca3af', 'Support');
+    priceLine(technicals.resistance_level, isDark ? '#6b7280' : '#9ca3af', 'Resistance');
   }
 
   // Entry dot marker — green circle at the entry date for a held position
