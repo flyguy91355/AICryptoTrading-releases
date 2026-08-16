@@ -284,7 +284,6 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
   <div class="stats-row">
     <div class="stat-card"><div class="stat-label">Day P/L</div><div class="stat-value" id="dayPnl">—</div></div>
     <div class="stat-card"><div class="stat-label">Total P/L</div><div class="stat-value" id="totalPnl">—</div></div>
-    <div class="stat-card"><div class="stat-label">Positions</div><div class="stat-value" id="posCount">—</div></div>
   </div>
 
   <div class="main-layout">
@@ -634,7 +633,6 @@ function updatePortfolio(p) {
   const totalPnlEl = document.getElementById('totalPnl');
   totalPnlEl.textContent = fmtUsd(p.total_pnl) + ' (' + p.total_pnl_pct.toFixed(2) + '%)';
   totalPnlEl.className = 'stat-value ' + pnlClass(p.total_pnl);
-  document.getElementById('posCount').textContent = p.positions.length;
   document.getElementById('posCountLabel').textContent = p.positions.length ? `(${p.positions.length})` : '';
 
   latestPositions = p.positions;
