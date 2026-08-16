@@ -75,6 +75,7 @@ class TechnicalIndicators:
     avg_volume_30d: int = 0
     support_level: float = 0.0
     resistance_level: float = 0.0
+    realized_vol_30d: float = 0.0   # annualized 30-day daily-return std dev, e.g. 0.85 = 85%
 
 
 @dataclass
@@ -219,6 +220,11 @@ class MarketDataFetcher:
         support_level = float(recent.min())
         resistance_level = float(recent.max())
 
+        # 30-day realized volatility: annualized std dev of daily log-returns.
+        # Crypto trades 365 days/year; sqrt(365) is the standard annualizer.
+        daily_returns = closes.pct_change().dropna()
+        vol_30d = float(daily_returns.tail(30).std() * (365 ** 0.5)) if len(daily_returns) >= 10 else 0.0
+
         return TechnicalIndicators(
             ticker=ticker,
             sma_50=round(sma_50, 2),
@@ -227,6 +233,7 @@ class MarketDataFetcher:
             avg_volume_30d=avg_volume_30d,
             support_level=round(support_level, 2),
             resistance_level=round(resistance_level, 2),
+            realized_vol_30d=round(vol_30d, 4),
         )
 
     async def get_long_term_trend(

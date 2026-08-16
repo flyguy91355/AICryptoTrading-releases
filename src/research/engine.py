@@ -126,7 +126,7 @@ CURRENT PRICE: ${current_price:.2f}
 
 ── NEWS & SENTIMENT ──
 {news_summary}
-{market_context_section}{long_term_trend_section}{asset_profile_section}{trade_history_section}
+{market_context_section}{volatility_section}{long_term_trend_section}{asset_profile_section}{trade_history_section}
 Based on all of the above, provide your analysis as JSON with these exact fields:
 {{
     "conviction_score": <1-10, one decimal place, e.g. 7.3>,
@@ -163,6 +163,38 @@ def _build_long_term_trend_section(long_term_trend_summary: str) -> str:
     if not long_term_trend_summary:
         return ""
     return f"\n── LONG-TERM TREND ──\n{long_term_trend_summary}\n"
+
+
+def _volatility_tier_label(realized_vol_30d: float) -> tuple[str, str]:
+    """Maps annualized 30-day realized volatility to a human-readable tier + description.
+    Thresholds calibrated for crypto: BTC/ETH sit ~50-80% annualized; mid-caps 80-150%;
+    small-caps/meme coins 150%+. Returns (tier_name, one-line description)."""
+    if realized_vol_30d <= 0:
+        return ("UNKNOWN", "volatility data unavailable")
+    if realized_vol_30d < 0.60:
+        return ("LOW", f"{realized_vol_30d*100:.0f}% annualized — behaves like a large-cap stablecoin-adjacent asset; tighter stops are reasonable")
+    if realized_vol_30d < 1.00:
+        return ("MODERATE", f"{realized_vol_30d*100:.0f}% annualized — typical for BTC/ETH class; standard crypto stop widths apply")
+    if realized_vol_30d < 1.60:
+        return ("HIGH", f"{realized_vol_30d*100:.0f}% annualized — mid-cap or sector coin; stops need meaningful room to avoid routine noise shakeouts")
+    return ("EXTREME", f"{realized_vol_30d*100:.0f}% annualized — small-cap or meme coin territory; a tight stop WILL get hit by normal daily swings, not a real thesis break")
+
+
+def _build_volatility_section(realized_vol_30d: float) -> str:
+    """Prompt section telling Claude this coin's volatility tier so it calibrates
+    stop width and trailing-stop width accordingly — not a mechanical rule, just
+    real data + framing for the model to reason from."""
+    tier, desc = _volatility_tier_label(realized_vol_30d)
+    if tier == "UNKNOWN":
+        return ""
+    return (
+        f"\n── VOLATILITY TIER ──\n"
+        f"{tier} — {desc}.\n"
+        f"Calibrate stop-loss distance and trailing-stop width to this tier: a {tier.lower()}-volatility "
+        f"asset needs proportionally {'more' if tier in ('HIGH','EXTREME') else 'standard'} room "
+        f"between entry and stop so that normal price noise doesn't trigger a stop that was "
+        f"placed for a real thesis break, not just routine chop.\n"
+    )
 
 
 def _build_market_context_section(market_change_pct: float | None) -> str:
@@ -249,13 +281,15 @@ class ResearchEngine:
             f"SMA50: ${technicals.sma_50:.2f} | SMA200: ${technicals.sma_200:.2f} | "
             f"RSI: {technicals.rsi:.1f} | Support: ${technicals.support_level:.2f} | "
             f"Resistance: ${technicals.resistance_level:.2f} | "
-            f"Avg Volume 30d: {technicals.avg_volume_30d:,}"
+            f"Avg Volume 30d: {technicals.avg_volume_30d:,} | "
+            f"30d Realized Vol: {technicals.realized_vol_30d*100:.0f}% annualized"
         )
         return {
             "current_price": quote.price,
             "technical_summary": technical_summary,
             "news_summary": sentiment_analysis.summary,
             "long_term_trend_summary": format_long_term_trend_summary(long_term_trend),
+            "realized_vol_30d": technicals.realized_vol_30d,
             "technicals": technicals,
             "sentiment_analysis": sentiment_analysis,
         }
@@ -287,6 +321,7 @@ class ResearchEngine:
                 ticker, asset_name, inp["current_price"], inp["technical_summary"],
                 inp["news_summary"], trade_history_summary,
                 inp["long_term_trend_summary"], model,
+                realized_vol_30d=inp.get("realized_vol_30d", 0.0),
             )
         else:
             logger.warning("No ANTHROPIC_API_KEY — generating rule-based report for %s", ticker)
@@ -343,6 +378,7 @@ class ResearchEngine:
             prompt = self._build_analysis_prompt(
                 ticker, inp["asset_name"], inp["current_price"], inp["technical_summary"],
                 inp["news_summary"], "", inp["long_term_trend_summary"], market_change_pct,
+                realized_vol_30d=inp.get("realized_vol_30d", 0.0),
             )
             requests.append({
                 "custom_id": _ticker_to_custom_id(ticker),
@@ -475,6 +511,7 @@ class ResearchEngine:
         technical_summary: str, news_summary: str,
         trade_history_summary: str = "", long_term_trend_summary: str = "",
         market_change_pct: float | None = None,
+        realized_vol_30d: float = 0.0,
     ) -> str:
         asset_profile = self.asset_profiles.get(ticker, {}).get("profile")
         tp_cfg = self.config.get("take_profit", {})
@@ -522,6 +559,7 @@ class ResearchEngine:
             long_term_trend_section=_build_long_term_trend_section(long_term_trend_summary),
             asset_profile_section=build_asset_profile_section(asset_profile),
             market_context_section=_build_market_context_section(market_change_pct),
+            volatility_section=_build_volatility_section(realized_vol_30d),
             stop_tp_instructions=stop_tp_instructions,
         )
 
@@ -529,12 +567,13 @@ class ResearchEngine:
         self, ticker: str, asset_name: str, current_price: float,
         technical_summary: str, news_summary: str,
         trade_history_summary: str = "", long_term_trend_summary: str = "",
-        model: str | None = None,
+        model: str | None = None, realized_vol_30d: float = 0.0,
     ) -> ResearchReport:
         market_change_pct = await self.market_data.get_market_change_pct()
         prompt = self._build_analysis_prompt(
             ticker, asset_name, current_price, technical_summary, news_summary,
             trade_history_summary, long_term_trend_summary, market_change_pct,
+            realized_vol_30d=realized_vol_30d,
         )
         try:
             response_text = await self._call_claude_with_retry(
