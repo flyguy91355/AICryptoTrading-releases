@@ -606,54 +606,58 @@ async function showAssetModal(ticker) {
   const pos = latestPositions.find(p => p.ticker === ticker);
   if (!r && !pos) return;
 
-  // Open the overlay immediately — before any badge/section construction so a
-  // setup error can't silently swallow the whole popup.
   document.getElementById('amChartWrap').style.display = '';
   document.getElementById('amTicker').textContent = ticker;
   document.getElementById('amName').textContent = (r && r.asset_name) || '';
-  document.getElementById('amBadges').innerHTML = '';
-  document.getElementById('amSections').innerHTML = '';
+
+  // Wrap setup in try/catch so a null field on a position card can't silently
+  // abort the whole function before classList.add('active') is reached.
+  let entry = null, entryTime = null, stop = null, takeProfits = [], fairValue = null;
+  try {
+    const sig = pos ? 'HELD' : (r.signal || '').toUpperCase();
+    const sc = pos ? {bg:'rgba(59,130,246,.15)', border:'#3b82f6', text:'#3b82f6'} : sigColors(sig);
+    const conviction = (r && r.conviction_score != null) ? Number(r.conviction_score).toFixed(1) : null;
+    const badges = [];
+    badges.push(`<span class="am-badge" style="background:${sc.bg};border:1px solid ${sc.border};color:${sc.text};">${sig}</span>`);
+    if (conviction !== null) badges.push(`<span class="am-badge am-badge-plain">Conviction ${conviction}/10</span>`);
+    if (r) badges.push(`<span class="am-badge am-badge-plain">Risk ${r.risk_level}</span>`);
+    if (r && r.rr !== null && r.rr !== undefined) {
+      const need = (r.required_rr !== null && r.required_rr !== undefined) ? ` (need ≥${r.required_rr.toFixed(2)})` : '';
+      badges.push(`<span class="am-badge am-badge-plain">R/R ${r.rr.toFixed(2)}${need}</span>`);
+    }
+    if (pos) badges.push(`<span class="am-badge am-badge-plain">${(pos.shares || 0).toFixed(6)} units · ${fmtUsd(pos.market_value)}</span>`);
+    const scanned = r ? fmtTime(r.generated_at) : '';
+    if (scanned) badges.push(`<span class="am-badge-time">Scanned ${scanned}</span>`);
+    document.getElementById('amBadges').innerHTML = badges.join('');
+
+    entry = pos ? pos.entry_price : (r ? r.entry_price : null);
+    entryTime = pos ? (pos.opened_at || null) : null;
+    stop = pos ? (pos.trailing_stop != null ? pos.trailing_stop : pos.stop_loss) : (r ? r.stop_loss : null);
+    takeProfits = pos ? (Array.isArray(pos.take_profit_targets) ? pos.take_profit_targets : []) : (r ? (r.take_profit_targets || []) : []);
+    fairValue = r ? r.fair_value_estimate : null;
+
+    const sections = [];
+    const addSection = (title, body) => { if (body) sections.push(`<div class="asset-modal-section"><div class="asset-modal-section-title">${title}</div><div class="asset-modal-section-body">${body}</div></div>`); };
+    if (r) {
+      addSection('Asset Summary', r.asset_summary);
+      addSection('Thesis', r.thesis);
+      addSection('Technical Summary', r.technical_summary);
+      addSection('News &amp; Sentiment', r.news_summary);
+      addSection('Risk Factors', r.risk_factors);
+      if (r.fair_value_estimate) addSection('Fair Value / Margin of Safety',
+        `Fair value estimate: ${fmtUsd(r.fair_value_estimate)}` +
+        (r.margin_of_safety_pct !== undefined && r.margin_of_safety_pct !== null ? ` &nbsp;•&nbsp; Margin of safety: ${r.margin_of_safety_pct.toFixed(1)}%` : ''));
+      addSection('Recommended Action', r.recommended_action);
+      addSection('Reasoning', r.reasoning);
+    } else {
+      sections.push('<div class="asset-modal-section"><div class="asset-modal-section-body">No research report cached for this position yet.</div></div>');
+    }
+    document.getElementById('amSections').innerHTML = sections.join('');
+  } catch (e) {
+    console.error('showAssetModal setup:', ticker, e);
+  }
+
   document.getElementById('assetModalOverlay').classList.add('active');
-
-  const sig = pos ? 'HELD' : (r.signal || '').toUpperCase();
-  const sc = pos ? {bg:'rgba(59,130,246,.15)', border:'#3b82f6', text:'#3b82f6'} : sigColors(sig);
-  const conviction = (r && r.conviction_score != null) ? Number(r.conviction_score).toFixed(1) : null;
-  const badges = [];
-  badges.push(`<span class="am-badge" style="background:${sc.bg};border:1px solid ${sc.border};color:${sc.text};">${sig}</span>`);
-  if (conviction !== null) badges.push(`<span class="am-badge am-badge-plain">Conviction ${conviction}/10</span>`);
-  if (r) badges.push(`<span class="am-badge am-badge-plain">Risk ${r.risk_level}</span>`);
-  if (r && r.rr !== null && r.rr !== undefined) {
-    const need = (r.required_rr !== null && r.required_rr !== undefined) ? ` (need ≥${r.required_rr.toFixed(2)})` : '';
-    badges.push(`<span class="am-badge am-badge-plain">R/R ${r.rr.toFixed(2)}${need}</span>`);
-  }
-  if (pos) badges.push(`<span class="am-badge am-badge-plain">${(pos.shares || 0).toFixed(6)} units · ${fmtUsd(pos.market_value)}</span>`);
-  const scanned = r ? fmtTime(r.generated_at) : '';
-  if (scanned) badges.push(`<span class="am-badge-time">Scanned ${scanned}</span>`);
-  document.getElementById('amBadges').innerHTML = badges.join('');
-
-  const entry = pos ? pos.entry_price : (r ? r.entry_price : null);
-  const entryTime = pos ? (pos.opened_at || null) : null;
-  const stop = pos ? (pos.trailing_stop != null ? pos.trailing_stop : pos.stop_loss) : (r ? r.stop_loss : null);
-  const takeProfits = pos ? (Array.isArray(pos.take_profit_targets) ? pos.take_profit_targets : []) : (r ? (r.take_profit_targets || []) : []);
-  const fairValue = r ? r.fair_value_estimate : null;
-
-  const sections = [];
-  const addSection = (title, body) => { if (body) sections.push(`<div class="asset-modal-section"><div class="asset-modal-section-title">${title}</div><div class="asset-modal-section-body">${body}</div></div>`); };
-  if (r) {
-    addSection('Asset Summary', r.asset_summary);
-    addSection('Thesis', r.thesis);
-    addSection('Technical Summary', r.technical_summary);
-    addSection('News &amp; Sentiment', r.news_summary);
-    addSection('Risk Factors', r.risk_factors);
-    if (r.fair_value_estimate) addSection('Fair Value / Margin of Safety',
-      `Fair value estimate: ${fmtUsd(r.fair_value_estimate)}` +
-      (r.margin_of_safety_pct !== undefined && r.margin_of_safety_pct !== null ? ` &nbsp;•&nbsp; Margin of safety: ${r.margin_of_safety_pct.toFixed(1)}%` : ''));
-    addSection('Recommended Action', r.recommended_action);
-    addSection('Reasoning', r.reasoning);
-  } else {
-    sections.push('<div class="asset-modal-section"><div class="asset-modal-section-body">No research report cached for this position yet.</div></div>');
-  }
-  document.getElementById('amSections').innerHTML = sections.join('');
 
   // Fetch a real year of daily OHLCV (enough for a genuine SMA200 line) fresh
   // every open rather than reusing the tiny 1mo card-sparkline fetch/cache.
