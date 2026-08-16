@@ -362,6 +362,18 @@ let latestPositions = [];
 const seenLogKeys = new Set();
 const chartInstances = {}; // containerId -> LightweightCharts chart, so re-renders dispose cleanly
 
+// Position card clicks: delegate from the grid so the sell button's mobile-expanded
+// touch target (~44px min height, physically ~16px) can't silently swallow taps
+// meant for the card body. Delegating here means we never need event.stopPropagation()
+// on the sell button — the delegate just skips any click originating from inside it.
+document.addEventListener('DOMContentLoaded', function () {
+  document.getElementById('positionsGrid').addEventListener('click', function (e) {
+    if (e.target.closest('.sell-btn')) return;
+    const card = e.target.closest('[data-pos-ticker]');
+    if (card) showAssetModal(card.dataset.posTicker);
+  });
+});
+
 function fmtUsd(n) {
   if (n === undefined || n === null) return '—';
   const sign = n < 0 ? '-' : '';
@@ -703,10 +715,10 @@ function updatePortfolio(p) {
     const stop = pos.trailing_stop !== null && pos.trailing_stop !== undefined ? pos.trailing_stop : pos.stop_loss;
     const trailNote = (pos.trailing_stop !== null && pos.trailing_stop !== undefined && pos.final_trail_pct)
       ? ` <span style="color:var(--text-muted);font-weight:500;">(AI trail→${pos.final_trail_pct.toFixed(1)}%)</span>` : '';
-    return `<div class="asset-card clickable" onclick="showAssetModal('${pos.ticker}')">
+    return `<div class="asset-card clickable" data-pos-ticker="${pos.ticker}">
       <div class="asset-card-header">
         <div><div class="asset-ticker">${pos.ticker}</div><div class="asset-name">${pos.shares.toFixed(6)} units</div></div>
-        <button class="sell-btn" onclick="event.stopPropagation(); manualSell('${pos.ticker}')">Sell</button>
+        <button class="sell-btn" onclick="manualSell('${pos.ticker}')">Sell</button>
       </div>
       <div class="asset-stats-row">
         <div class="asset-stat"><div class="asset-stat-label">Entry</div><div class="asset-stat-value">${fmtUsd(pos.entry_price)}</div></div>
