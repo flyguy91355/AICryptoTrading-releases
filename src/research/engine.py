@@ -47,6 +47,19 @@ class RiskLevel(Enum):
     HIGH = "HIGH"
 
 
+def _fmt_price(price: float) -> str:
+    """Format a price for prompt/display regardless of magnitude.
+    Normal prices (>= $0.01): 2 decimal places. Sub-cent prices (SHIB, PEPE, etc.):
+    enough decimals to show 4 significant figures — prevents $0.000004470 from
+    being displayed as '$0.00' to Claude, which caused 'insufficient data' responses."""
+    if price == 0.0:
+        return "0.00"
+    if abs(price) >= 0.01:
+        return f"{price:.2f}"
+    decimals = max(2, -math.floor(math.log10(abs(price))) + 3)
+    return f"{price:.{decimals}f}"
+
+
 def _ticker_to_custom_id(ticker: str) -> str:
     """Anthropic's Batch API requires custom_id to match ^[a-zA-Z0-9_-]{1,64}$ --
     confirmed live 2026-08-16 as a real 400 (AITrading's own stock-ticker version of
@@ -119,7 +132,7 @@ IMPORTANT RULES:
 - If a HISTORICAL CHARACTER section is present below, weigh it too: it's a real backtest of THIS asset's own past breakout reliability and drawdown behavior, not generic crypto advice — use it to calibrate how much weight a similar-looking setup deserves for this specific asset, not as a mechanical rule.
 
 ASSET: {ticker} — {asset_name}
-CURRENT PRICE: ${current_price:.2f}
+CURRENT PRICE: ${current_price}
 
 ── TECHNICAL CONTEXT ──
 {technical_summary}
@@ -277,10 +290,10 @@ class ResearchEngine:
             return None
 
         technical_summary = (
-            f"Price: ${quote.price:.2f} | 24h change: {quote.change_pct:+.2f}% | "
-            f"SMA50: ${technicals.sma_50:.2f} | SMA200: ${technicals.sma_200:.2f} | "
-            f"RSI: {technicals.rsi:.1f} | Support: ${technicals.support_level:.2f} | "
-            f"Resistance: ${technicals.resistance_level:.2f} | "
+            f"Price: ${_fmt_price(quote.price)} | 24h change: {quote.change_pct:+.2f}% | "
+            f"SMA50: ${_fmt_price(technicals.sma_50)} | SMA200: ${_fmt_price(technicals.sma_200)} | "
+            f"RSI: {technicals.rsi:.1f} | Support: ${_fmt_price(technicals.support_level)} | "
+            f"Resistance: ${_fmt_price(technicals.resistance_level)} | "
             f"Avg Volume 30d: {technicals.avg_volume_30d:,} | "
             f"30d Realized Vol: {technicals.realized_vol_30d*100:.0f}% annualized"
         )
@@ -552,7 +565,7 @@ class ResearchEngine:
             rr_floor=rr_floor,
             ticker=ticker,
             asset_name=asset_name,
-            current_price=current_price,
+            current_price=_fmt_price(current_price),
             technical_summary=technical_summary,
             news_summary=news_summary,
             trade_history_section=_build_trade_history_section(trade_history_summary),
@@ -716,8 +729,8 @@ class ResearchEngine:
 
         logger.warning("Rule-based fallback analysis for %s — AI unavailable, buy signals blocked", ticker)
         technical_summary = (
-            f"Price: ${price:.2f} | RSI: {technicals.rsi:.1f} | "
-            f"Support: ${technicals.support_level:.2f} | Resistance: ${technicals.resistance_level:.2f}"
+            f"Price: ${_fmt_price(price)} | RSI: {technicals.rsi:.1f} | "
+            f"Support: ${_fmt_price(technicals.support_level)} | Resistance: ${_fmt_price(technicals.resistance_level)}"
         )
         return ResearchReport(
             ticker=ticker,

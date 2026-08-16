@@ -43,6 +43,22 @@ _YFINANCE_TICKER_OVERRIDES = {
 }
 
 
+def _round_price(price: float) -> float:
+    """Round a price to a meaningful number of decimal places regardless of magnitude.
+    Normal prices (>= $0.01): 2 decimal places (e.g. $1.23).
+    Sub-cent prices (SHIB, PEPE etc.): 4 significant figures so $0.000004470 stays
+    $0.000004470 instead of being truncated to $0.00 by round(x, 2)."""
+    if price == 0.0:
+        return 0.0
+    import math
+    if abs(price) >= 0.01:
+        return round(price, 2)
+    # Find how many decimal places needed to show 4 significant figures
+    magnitude = math.floor(math.log10(abs(price)))
+    decimals = max(2, -magnitude + 3)   # e.g. 4.47e-6 → magnitude=-6 → decimals=9
+    return round(price, decimals)
+
+
 def to_yfinance_symbol(alpaca_symbol: str) -> str:
     """Converts this project's canonical Alpaca-format symbol ("BTC/USD") to
     yfinance's own format ("BTC-USD"). Pure string transform for the overwhelming
@@ -227,12 +243,12 @@ class MarketDataFetcher:
 
         return TechnicalIndicators(
             ticker=ticker,
-            sma_50=round(sma_50, 2),
-            sma_200=round(sma_200, 2),
+            sma_50=_round_price(sma_50),
+            sma_200=_round_price(sma_200),
             rsi=round(rsi, 2),
             avg_volume_30d=avg_volume_30d,
-            support_level=round(support_level, 2),
-            resistance_level=round(resistance_level, 2),
+            support_level=_round_price(support_level),
+            resistance_level=_round_price(resistance_level),
             realized_vol_30d=round(vol_30d, 4),
         )
 
