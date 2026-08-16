@@ -330,7 +330,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
       <button class="asset-modal-close" onclick="closeAssetModal()">×</button>
     </div>
     <div class="asset-modal-badges" id="amBadges"></div>
-    <div class="asset-modal-chart-wrap">
+    <div class="asset-modal-chart-wrap" id="amChartWrap">
       <div class="asset-modal-legend" id="amLegend"></div>
       <div class="asset-modal-chart" id="amChart"></div>
     </div>
@@ -561,6 +561,7 @@ async function showAssetModal(ticker) {
   const pos = latestPositions.find(p => p.ticker === ticker);
   if (!r && !pos) return;
 
+  document.getElementById('amChartWrap').style.display = '';
   document.getElementById('amTicker').textContent = ticker;
   document.getElementById('amName').textContent = (r && r.asset_name) || '';
 
@@ -897,6 +898,7 @@ function openUpdatePanel() {
   document.getElementById('amBadges').innerHTML = '';
   document.getElementById('amLegend').innerHTML = '';
   document.getElementById('amChart').innerHTML = '';
+  document.getElementById('amChartWrap').style.display = 'none';
   document.getElementById('amSections').innerHTML = `
     <div style="padding:12px;">
       <p style="margin:0 0 8px 0;">Current: <b>${_updateStatus.current}</b> &rarr; Latest: <b>${_updateStatus.latest}</b></p>
