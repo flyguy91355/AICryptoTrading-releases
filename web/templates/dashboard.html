@@ -104,10 +104,25 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
    fill 2 of 4) hold the brand-mark instead of stretching those two cards to fill the gap,
    same layout AITrading itself uses for the same reason. */
 .stats-row-top { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
-.stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+.stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 18px; }
 .stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 13px 15px; }
+.stat-card.clickable { cursor: pointer; }
+.stat-card.clickable:hover { background: var(--bg-card-hover); }
 .stat-label { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; font-weight: 600; }
 .stat-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat-sub { font-size: 11px; color: var(--text-muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+/* P/L history popup list — same pattern as AITrading's Week/Day P/L lists */
+.pl-list { padding: 4px 0; }
+.pl-row { display: flex; align-items: center; gap: 10px; padding: 7px 16px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.pl-row:last-child { border-bottom: none; }
+.pl-label { flex: 0 0 110px; color: var(--text-muted); font-size: 11.5px; }
+.pl-pct { flex: 0 0 64px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pl-dollar { flex: 0 0 84px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.pl-bar-wrap { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.pl-bar { height: 100%; border-radius: 3px; }
+.pl-chart-wrap { padding: 4px 16px 12px; }
+.pl-chart { height: 220px; border-radius: 8px; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border); }
 .green { color: var(--green); } .red { color: var(--red); }
 
 .brand-mark { grid-column: span 2; display: flex; align-items: center; gap: 14px; padding: 2px 8px; }
@@ -282,8 +297,11 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
     </div>
   </div>
   <div class="stats-row">
-    <div class="stat-card"><div class="stat-label">Day P/L</div><div class="stat-value" id="dayPnl">—</div></div>
-    <div class="stat-card"><div class="stat-label">Total P/L</div><div class="stat-value" id="totalPnl">—</div></div>
+    <div class="stat-card clickable" onclick="openPerfPopup('day')"><div class="stat-label">Day P/L</div><div class="stat-value" id="dayPnl">—</div><div class="stat-sub" id="dayPnlPct"></div></div>
+    <div class="stat-card clickable" onclick="openPerfPopup('week')"><div class="stat-label">Week P/L</div><div class="stat-value" id="weekPnl">—</div><div class="stat-sub" id="weekPnlPct"></div></div>
+    <div class="stat-card clickable" onclick="openPerfPopup('month')"><div class="stat-label">Month P/L</div><div class="stat-value" id="monthPnl">—</div><div class="stat-sub" id="monthPnlPct"></div></div>
+    <div class="stat-card clickable" onclick="openPerfPopup('ytd')"><div class="stat-label">YTD P/L</div><div class="stat-value" id="ytdPnl">—</div><div class="stat-sub" id="ytdPnlPct"></div></div>
+    <div class="stat-card clickable" onclick="openPerfPopup('total')"><div class="stat-label">Total P/L</div><div class="stat-value" id="totalPnl">—</div><div class="stat-sub" id="totalPnlPct"></div></div>
   </div>
 
   <div class="main-layout">
@@ -630,9 +648,11 @@ function updatePortfolio(p) {
   const dayPnlEl = document.getElementById('dayPnl');
   dayPnlEl.textContent = fmtUsd(p.day_pnl);
   dayPnlEl.className = 'stat-value ' + pnlClass(p.day_pnl);
+  document.getElementById('dayPnlPct').textContent = p.day_pnl_pct != null ? p.day_pnl_pct.toFixed(2) + '%' : '';
   const totalPnlEl = document.getElementById('totalPnl');
-  totalPnlEl.textContent = fmtUsd(p.total_pnl) + ' (' + p.total_pnl_pct.toFixed(2) + '%)';
+  totalPnlEl.textContent = fmtUsd(p.total_pnl);
   totalPnlEl.className = 'stat-value ' + pnlClass(p.total_pnl);
+  document.getElementById('totalPnlPct').textContent = p.total_pnl_pct != null ? p.total_pnl_pct.toFixed(2) + '%' : '';
   document.getElementById('posCountLabel').textContent = p.positions.length ? `(${p.positions.length})` : '';
 
   latestPositions = p.positions;
@@ -955,6 +975,134 @@ function pollUntilBackUpThenReload() {
         else if (statusEl) { statusEl.textContent = 'Still restarting — reload the page manually when ready.'; }
       });
   }, 3000);
+}
+
+// ── P/L tile history popups ───────────────────────────────────────────────────
+let _perfPoints = [];   // full daily equity history [{date, equity}, ...]
+let _perfTiles  = {};   // {week, month, ytd} from last /api/perf-history fetch
+
+async function fetchPerfTiles() {
+  try {
+    const resp = await fetch('/api/perf-history');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    _perfPoints = data.points || [];
+    _perfTiles  = data.tiles  || {};
+    const cur = data.current_equity;
+
+    function setTile(elId, subId, info) {
+      const el  = document.getElementById(elId);
+      const sub = document.getElementById(subId);
+      if (!el || !sub) return;
+      if (info == null || info.pnl == null) { el.textContent = '—'; sub.textContent = ''; el.className = 'stat-value'; return; }
+      el.textContent  = fmtUsd(info.pnl);
+      el.className    = 'stat-value ' + pnlClass(info.pnl);
+      sub.textContent = info.pct != null ? info.pct.toFixed(2) + '%' : '';
+    }
+    setTile('weekPnl',  'weekPnlPct',  _perfTiles.week);
+    setTile('monthPnl', 'monthPnlPct', _perfTiles.month);
+    setTile('ytdPnl',   'ytdPnlPct',  _perfTiles.ytd);
+  } catch (e) { console.error('fetchPerfTiles:', e); }
+}
+fetchPerfTiles();
+setInterval(fetchPerfTiles, 60000);
+
+function openPerfPopup(bucket) {
+  // titles and iso floors for each bucket
+  const cfg = {
+    day:   { title: 'Day P/L History',   floor: null },
+    week:  { title: 'Week P/L History',  floor: _weekFloor()  },
+    month: { title: 'Month P/L History', floor: _monthFloor() },
+    ytd:   { title: 'YTD P/L History',   floor: _ytdFloor()   },
+    total: { title: 'Total P/L History', floor: null           },
+  }[bucket] || { title: 'P/L History', floor: null };
+
+  document.getElementById('amTicker').textContent = cfg.title;
+  document.getElementById('amName').textContent   = '';
+  document.getElementById('amBadges').innerHTML   = '';
+  document.getElementById('amLegend').innerHTML   = '';
+  document.getElementById('amChart').innerHTML    = '';
+
+  const chartWrap = document.getElementById('amChartWrap');
+  const sections  = document.getElementById('amSections');
+
+  if (bucket === 'total' && _perfPoints.length >= 2) {
+    // Total popup: equity curve chart + list
+    chartWrap.style.display = '';
+    const listHtml = _buildPerfList(_perfPoints, null);
+    sections.innerHTML = `<div class="pl-list">${listHtml}</div>`;
+    // Render Lightweight Charts equity curve
+    requestAnimationFrame(() => {
+      const el = document.getElementById('amChart');
+      if (!el || typeof LightweightCharts === 'undefined') return;
+      const chart = LightweightCharts.createChart(el, {
+        layout: { background: { color: 'transparent' }, textColor: getComputedStyle(document.documentElement).getPropertyValue('--text-muted').trim() || '#888' },
+        grid:   { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
+        rightPriceScale: { borderVisible: false },
+        timeScale: { borderVisible: false, fixRightEdge: true },
+        crosshair: { mode: 1 },
+        handleScroll: false, handleScale: false,
+      });
+      const series = chart.addAreaSeries({
+        lineColor: 'var(--accent)',
+        topColor:  'rgba(59,130,246,0.25)',
+        bottomColor: 'rgba(59,130,246,0.0)',
+        lineWidth: 2,
+        priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+      });
+      series.setData(_perfPoints.map(p => ({ time: p.date, value: p.equity })));
+      chart.timeScale().fitContent();
+    });
+  } else {
+    chartWrap.style.display = 'none';
+    // List-only popups: compute per-row daily P/L entries
+    const listHtml = _buildPerfList(_perfPoints, cfg.floor);
+    sections.innerHTML = listHtml
+      ? `<div class="pl-list">${listHtml}</div>`
+      : `<p style="padding:16px;color:var(--text-muted);font-size:13px;">No history available yet.</p>`;
+  }
+
+  document.getElementById('assetModalOverlay').classList.add('active');
+}
+
+function _weekFloor()  { const d=new Date(); d.setDate(d.getDate()-d.getDay()+1); return d.toISOString().slice(0,10); }
+function _monthFloor() { const d=new Date(); return new Date(d.getFullYear(),d.getMonth(),1).toISOString().slice(0,10); }
+function _ytdFloor()   { return new Date().getFullYear() + '-01-01'; }
+
+function _buildPerfList(points, isoFloor) {
+  if (!points || points.length < 2) return '';
+  const filtered = isoFloor ? points.filter(p => p.date >= isoFloor) : points;
+  if (filtered.length < 2) return '';
+
+  // compute daily P&L rows: each day vs the previous day's equity
+  const rows = [];
+  // for the floor-bounded case we need the day before the floor as baseline
+  const baseIdx = isoFloor ? points.findIndex(p => p.date >= isoFloor) - 1 : 0;
+  const base = baseIdx >= 0 ? points[baseIdx] : null;
+
+  for (let i = filtered.length - 1; i >= 0; i--) {
+    const cur  = filtered[i];
+    const prev = i === 0 ? base : filtered[i - 1];
+    if (!prev) continue;
+    const pnl = cur.equity - prev.equity;
+    const pct = prev.equity ? (pnl / prev.equity) * 100 : 0;
+    rows.push({ date: cur.date, pnl, pct });
+  }
+  if (!rows.length) return '';
+
+  const maxAbs = Math.max(...rows.map(r => Math.abs(r.pnl)));
+  return rows.map(r => {
+    const cls   = r.pnl >= 0 ? 'green' : 'red';
+    const barW  = maxAbs > 0 ? Math.round(Math.abs(r.pnl) / maxAbs * 100) : 0;
+    const barC  = r.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const sign  = r.pnl >= 0 ? '+' : '';
+    return `<div class="pl-row">
+      <span class="pl-label">${r.date}</span>
+      <span class="pl-pct ${cls}">${sign}${r.pct.toFixed(2)}%</span>
+      <span class="pl-dollar">${sign}${fmtUsd(r.pnl)}</span>
+      <span class="pl-bar-wrap"><span class="pl-bar" style="width:${barW}%;background:${barC};"></span></span>
+    </div>`;
+  }).join('');
 }
 </script>
 </body>

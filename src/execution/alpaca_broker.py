@@ -394,6 +394,28 @@ class AlpacaBroker(Broker):
             logger.warning("get_portfolio_history failed: %s", e)
             return []
 
+    async def get_portfolio_history_daily(self) -> list[dict]:
+        """Full daily equity history since inception (period='all', timeframe='1D').
+        Returns list of {date: 'YYYY-MM-DD', equity: float}, oldest first.
+        Returns [] on any error — display-only, never affects trading."""
+        try:
+            from datetime import timezone
+            history = await self._call_with_rate_limit_retry(
+                lambda: self.api.get_portfolio_history(period="all", timeframe="1D")
+            )
+            timestamps = history.timestamp or []
+            equities = history.equity or []
+            result = []
+            for t, e in zip(timestamps, equities):
+                if e is None or float(e) == 0.0:
+                    continue
+                dt = datetime.fromtimestamp(float(t), tz=timezone.utc)
+                result.append({"date": dt.strftime("%Y-%m-%d"), "equity": round(float(e), 2)})
+            return result
+        except Exception as e:
+            logger.warning("get_portfolio_history_daily failed: %s", e)
+            return []
+
     async def get_quote(self, ticker: str) -> float | None:
         """Latest quote via Alpaca's own crypto quote endpoint. Confirmed against the
         installed SDK's real method (get_latest_crypto_quotes -- plural, takes a list,

@@ -194,6 +194,7 @@ class DashboardState:
             "total_pnl": p.total_pnl,
             "total_pnl_pct": p.total_pnl_pct,
             "day_pnl": p.day_pnl,
+            "day_pnl_pct": round(p.day_pnl / p.day_start_value * 100, 4) if p.day_start_value else 0.0,
             "peak_value": p.peak_value,
             "positions": [
                 {
@@ -869,6 +870,59 @@ async def get_update_status():
         "available": is_newer(current, release["tag_name"]),
         "notes": release["notes"],
         "severity": release["severity"],
+    }
+
+
+_perf_history_cache: list[dict] | None = None
+_perf_history_cache_time: datetime | None = None
+
+
+@app.get("/api/perf-history")
+async def get_perf_history():
+    """Full daily equity history from Alpaca, cached 5 min. Returns points for
+    the popup charts/lists plus computed week/month/ytd tile values."""
+    global _perf_history_cache, _perf_history_cache_time
+    now = datetime.now()
+    if (
+        _perf_history_cache is not None
+        and _perf_history_cache_time is not None
+        and (now - _perf_history_cache_time).total_seconds() < 300
+    ):
+        points = _perf_history_cache
+    else:
+        points = await state.broker.get_portfolio_history_daily()
+        _perf_history_cache = points
+        _perf_history_cache_time = now
+
+    p = state.portfolio
+    current = p.total_value
+    today = now.date()
+
+    def start_equity(iso_floor: str) -> float | None:
+        for pt in reversed(points):
+            if pt["date"] < iso_floor:
+                return pt["equity"]
+        return points[0]["equity"] if points else None
+
+    def tile(iso_floor: str) -> dict:
+        ref = start_equity(iso_floor)
+        if ref is None or ref == 0:
+            return {"pnl": None, "pct": None}
+        pnl = current - ref
+        return {"pnl": round(pnl, 2), "pct": round(pnl / ref * 100, 4)}
+
+    week_start = (today - timedelta(days=today.weekday())).isoformat()
+    month_start = today.replace(day=1).isoformat()
+    ytd_start = today.replace(month=1, day=1).isoformat()
+
+    return {
+        "points": points,
+        "current_equity": round(current, 2),
+        "tiles": {
+            "week": tile(week_start),
+            "month": tile(month_start),
+            "ytd": tile(ytd_start),
+        },
     }
 
 
