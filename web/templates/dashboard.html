@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1400, initial-scale=0.35, user-scalable=yes, maximum-scale=5.0, minimum-scale=0.1">
+<meta name="theme-color" content="#0a0e17">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Hilton's AI Crypto">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<title>Hilton's AI Crypto Trading — Live Dashboard</title>
+<script>
+(function() {
+  // Defaults to dark regardless of system preference (2026-08-15, owner request) --
+  // unlike AITrading's own per-device system-preference-following behavior, this
+  // dashboard should come up dark by default; a device that's toggled the theme
+  // manually (a real localStorage value) is still respected either way.
+  const stored = localStorage.getItem('theme');
+  const theme = stored || 'dark';
+  document.documentElement.setAttribute('data-theme', theme);
+})();
+</script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+:root {
+  --bg-primary: #0a0e17;
+  --bg-secondary: #111827;
+  --bg-card: #1a2332;
+  --bg-card-hover: #1f2b3d;
+  --bg-input: #0d1421;
+  --border: #2a3a4e;
+  --border-light: #374151;
+  --text-primary: #e5e7eb;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --green: #10b981;
+  --green-bg: rgba(16,185,129,0.1);
+  --green-border: rgba(16,185,129,0.3);
+  --red: #ef4444;
+  --red-bg: rgba(239,68,68,0.1);
+  --red-border: rgba(239,68,68,0.3);
+  --cyan: #06b6d4;
+}
+:root[data-theme="light"] {
+  --bg-primary: #f3f5f8;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #eef1f6;
+  --bg-input: #ffffff;
+  --border: #d8dee6;
+  --border-light: #c5ccd6;
+  --text-primary: #10151f;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7280;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --green: #059669;
+  --green-bg: rgba(5,150,105,0.10);
+  --green-border: rgba(5,150,105,0.30);
+  --red: #dc2626;
+  --red-bg: rgba(220,38,38,0.10);
+  --red-border: rgba(220,38,38,0.30);
+  --cyan: #0891b2;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg-primary); color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+}
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 24px; background: var(--bg-secondary); border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark-svg { flex-shrink: 0; }
+.brand-text { display: flex; flex-direction: column; justify-content: center; }
+.logo { font-size: 18px; font-weight: 700; background: linear-gradient(90deg, var(--accent), var(--cyan));
+  -webkit-background-clip: text; background-clip: text; color: transparent; line-height: 1.15; }
+.brand-tagline { font-size: 10.5px; color: var(--text-muted); letter-spacing: .02em; margin-top: 1px; }
+.badge { padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;
+  background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+#connStatus { font-size: 12px; color: var(--text-muted); }
+#wsDisconnectedBanner {
+  display: none; align-items: center; justify-content: center; gap: 14px;
+  background: var(--red-bg); color: var(--red); border-bottom: 1px solid var(--red-border);
+  padding: 10px 16px; font-size: 13px; font-weight: 600;
+}
+#wsDisconnectedBanner button {
+  background: var(--red); color: #fff; border: none; border-radius: 6px;
+  padding: 5px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer;
+}
+#wsDisconnectedBanner button:hover { opacity: .85; }
+.header-controls { display: flex; align-items: center; gap: 14px; }
+.settings-link { color: var(--text-secondary); text-decoration: none; font-size: 13px; font-weight: 600;
+  display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; transition: background .15s, color .15s; }
+.settings-link:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
+
+/* Top stat rows -- split so the second row's empty columns (once Total Value/Cash only
+   fill 2 of 4) hold the brand-mark instead of stretching those two cards to fill the gap,
+   same layout AITrading itself uses for the same reason. */
+.stats-row-top { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
+.stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+.stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 13px 15px; }
+.stat-label { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; font-weight: 600; }
+.stat-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.green { color: var(--green); } .red { color: var(--red); }
+
+.brand-mark { grid-column: span 2; display: flex; align-items: center; gap: 14px; padding: 2px 8px; }
+.brand-mark-icon { flex-shrink: 0; }
+.brand-mark-text { display: flex; flex-direction: column; justify-content: center; }
+.brand-mark-word { font-size: 15px; font-weight: 700; line-height: 1.2;
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  -webkit-background-clip: text; background-clip: text; color: transparent; }
+.brand-mark-tag { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+.brand-mark-by { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+.brand-mark-hilton { color: var(--cyan); font-weight: 700; font-size: 15px; }
+
+/* Three-column main layout, same shape as AITrading's own dashboard: left column for
+   Positions + Recent Sells, middle for the scanned-universe cards, right a fixed-width
+   AI Research Log. */
+.main-layout { display: grid; grid-template-columns: 1.25fr 1fr 380px; gap: 18px; align-items: start; }
+.col { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+
+.panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.panel-title { padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: 12.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); display: flex; align-items: center; justify-content: space-between; }
+.panel-title .count { color: var(--text-muted); font-weight: 500; text-transform: none; letter-spacing: 0; margin-left: 6px; }
+
+/* Card grid for Positions + Universe, modeled on AITrading's On Deck card language */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; padding: 14px; }
+.asset-card { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  display: flex; flex-direction: column; gap: 8px; transition: border-color .15s; }
+.asset-card:hover { border-color: var(--border-light); }
+.asset-card-header { display: flex; justify-content: space-between; align-items: flex-start; }
+.asset-ticker { font-size: 15px; font-weight: 700; }
+.asset-name { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.asset-sig { padding: 3px 7px; border-radius: 5px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.sig-buy { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
+.sig-sell { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
+.sig-hold, .sig-no-action { background: rgba(107,114,128,0.12); color: var(--text-muted); border: 1px solid var(--border); }
+
+.asset-stats-row { display: flex; gap: 10px; }
+.asset-stat { flex: 1; min-width: 0; }
+.asset-stat-label { font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.asset-stat-value { font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.asset-chart-box { height: 56px; border-radius: 6px; overflow: hidden; background: var(--bg-card); border: 1px solid var(--border); }
+.asset-thesis { font-size: 11px; color: var(--text-secondary); line-height: 1.45; max-height: 46px; overflow: hidden; }
+
+.sell-btn { align-self: flex-start; background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border);
+  border-radius: 6px; padding: 4px 9px; font-size: 11px; cursor: pointer; font-weight: 600; }
+.sell-btn:hover { background: var(--red-border); }
+
+.log-panel { max-height: 900px; overflow-y: auto; }
+.log-row { padding: 6px 16px; border-bottom: 1px solid var(--border); font-size: 11.5px; font-family: ui-monospace, monospace; }
+.log-row:last-child { border-bottom: none; }
+.log-time { color: var(--text-muted); margin-right: 8px; }
+.log-phase { color: var(--accent); margin-right: 8px; }
+.log-error { color: var(--red); }
+.log-warning { color: #f59e0b; }
+.empty { grid-column: 1 / -1; padding: 24px; text-align: center; color: var(--text-muted); font-size: 13px; }
+
+/* Recent Sells -- a plain table, not a card grid, matching AITrading's own Recent Sells
+   treatment (a dense list reads better than cards for a chronological trade log). */
+.sells-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sells-table th { text-align: left; padding: 8px 12px; font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--text-muted); border-bottom: 1px solid var(--border); font-weight: 600; }
+.sells-table td { padding: 7px 12px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sells-table tr:last-child td { border-bottom: none; }
+.sells-reason { color: var(--text-secondary); font-size: 11px; white-space: normal; }
+.sells-wrap { max-height: 360px; overflow-y: auto; }
+
+.asset-card.clickable { cursor: pointer; }
+
+/* Asset detail modal -- signal/conviction/entry/stop/TP + full report sections +
+   a real detailed chart, matching AITrading's stock research modal in spirit but
+   scoped to this project's own report fields (no fundamentals/insider data --
+   crypto genuinely has none of that, see ANALYSIS_PROMPT's own rules). */
+#assetModalOverlay {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  align-items: flex-start; justify-content: center; z-index: 1000; padding: 40px 16px; overflow-y: auto;
+}
+#assetModalOverlay.active { display: flex; }
+.asset-modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+  width: 100%; max-width: 860px; padding: 20px 22px; }
+.asset-modal-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 4px; }
+.asset-modal-title { font-size: 19px; font-weight: 700; }
+.asset-modal-name { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+.asset-modal-close { background: none; border: none; color: var(--text-muted); font-size: 22px;
+  cursor: pointer; line-height: 1; padding: 4px; }
+.asset-modal-close:hover { color: var(--text-primary); }
+.asset-modal-badges { display: flex; align-items: center; gap: 10px; margin: 12px 0 14px; flex-wrap: wrap; }
+.am-badge { padding: 4px 11px; border-radius: 6px; font-size: 12.5px; font-weight: 700; }
+.am-badge-plain { background: var(--bg-secondary); border: 1px solid var(--border); font-weight: 600; font-size: 12px; }
+.am-badge-time { margin-left: auto; color: var(--text-muted); font-size: 11px; font-weight: 500; }
+.asset-modal-chart-wrap { margin-bottom: 16px; }
+.asset-modal-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--text-secondary);
+  margin-bottom: 6px; padding: 0 2px; }
+.asset-modal-legend span.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+.asset-modal-chart { height: 420px; border-radius: 8px; overflow: hidden; background: var(--bg-secondary); border: 1px solid var(--border); }
+.asset-modal-section { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 13px; margin-bottom: 10px; }
+.asset-modal-section-title { font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: .05em; margin-bottom: 6px; }
+.asset-modal-section-body { font-size: 13px; color: var(--text-primary); line-height: 1.55; white-space: pre-line; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg class="brand-mark-svg" width="40" height="30" viewBox="0 0 72 54" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="hdrGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#3b82f6"/>
+          <stop offset="100%" stop-color="#06b6d4"/>
+        </linearGradient>
+      </defs>
+      <!-- Ascending bars, same motif as AITrading's own brand-mark -->
+      <rect x="2"  y="34" width="10" height="18" rx="2" fill="url(#hdrGrad)" opacity="0.5"/>
+      <rect x="17" y="24" width="10" height="28" rx="2" fill="url(#hdrGrad)" opacity="0.72"/>
+      <rect x="32" y="12" width="10" height="40" rx="2" fill="url(#hdrGrad)" opacity="0.88"/>
+      <rect x="47" y="2"  width="10" height="50" rx="2" fill="url(#hdrGrad)"/>
+      <!-- Connected-node "AI reading the trend" overlay -->
+      <polyline points="7,30 22,20 37,9 52,-2" fill="none" stroke="url(#hdrGrad)" stroke-width="2" opacity="0.9"/>
+      <circle cx="7" cy="30" r="3" fill="#06b6d4"/>
+      <circle cx="22" cy="20" r="3" fill="#06b6d4"/>
+      <circle cx="37" cy="9" r="3" fill="#3b82f6"/>
+      <circle cx="52" cy="1" r="3.5" fill="#3b82f6"/>
+    </svg>
+    <div class="brand-text">
+      <div class="logo">Hilton's AI Crypto Trading</div>
+      <div class="brand-tagline">AI-Powered Crypto Research &amp; Automatic Trading</div>
+    </div>
+  </div>
+  <div class="header-controls">
+    <div id="updateAvailableBadge"
+         style="display:none;align-items:center;gap:6px;padding:4px 10px;border:1px solid;border-radius:12px;font-size:12px;cursor:pointer;"
+         onclick="openUpdatePanel()"
+         title="Click for details">
+    </div>
+    <a class="settings-link" href="/settings">⚙ Settings</a>
+    <span id="paperBadge" class="badge">PAPER</span>
+    <span id="connStatus">Connecting…</span>
+  </div>
+</header>
+<div id="wsDisconnectedBanner">
+  <span>⚠ Live connection lost — showing data as of <span id="wsFrozenSince">just now</span>. Falling back to periodic refresh.</span>
+  <button onclick="location.reload()">Reload Now</button>
+</div>
+<main>
+  <div class="stats-row-top">
+    <div class="stat-card"><div class="stat-label">Total Value</div><div class="stat-value" id="totalValue">—</div></div>
+    <div class="stat-card"><div class="stat-label">Cash</div><div class="stat-value" id="cash">—</div></div>
+    <div class="brand-mark">
+      <svg class="brand-mark-icon" width="60" height="45" viewBox="0 0 72 54" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="brandGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#3b82f6"/>
+            <stop offset="100%" stop-color="#06b6d4"/>
+          </linearGradient>
+        </defs>
+        <rect x="2"  y="34" width="10" height="18" rx="2" fill="url(#brandGrad)" opacity="0.5"/>
+        <rect x="17" y="24" width="10" height="28" rx="2" fill="url(#brandGrad)" opacity="0.72"/>
+        <rect x="32" y="12" width="10" height="40" rx="2" fill="url(#brandGrad)" opacity="0.88"/>
+        <rect x="47" y="2"  width="10" height="50" rx="2" fill="url(#brandGrad)"/>
+        <polyline points="7,30 22,20 37,9 52,-2" fill="none" stroke="url(#brandGrad)" stroke-width="2" opacity="0.9"/>
+        <circle cx="7" cy="30" r="3" fill="#06b6d4"/>
+        <circle cx="22" cy="20" r="3" fill="#06b6d4"/>
+        <circle cx="37" cy="9" r="3" fill="#3b82f6"/>
+        <circle cx="52" cy="1" r="3.5" fill="#3b82f6"/>
+      </svg>
+      <div class="brand-mark-text">
+        <div class="brand-mark-word">Hilton's AI Crypto Trading</div>
+        <div class="brand-mark-tag">AI-Powered Crypto Research &amp; Automatic Trading</div>
+        <div class="brand-mark-by">by <span class="brand-mark-hilton">Hilton Group</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-label">Day P/L</div><div class="stat-value" id="dayPnl">—</div></div>
+    <div class="stat-card"><div class="stat-label">Total P/L</div><div class="stat-value" id="totalPnl">—</div></div>
+    <div class="stat-card"><div class="stat-label">Positions</div><div class="stat-value" id="posCount">—</div></div>
+  </div>
+
+  <div class="main-layout">
+    <div class="col">
+      <div class="panel">
+        <div class="panel-title">Positions<span class="count" id="posCountLabel"></span></div>
+        <div id="positionsGrid" class="card-grid"><div class="empty">No open positions</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Recent Sells<span class="count" id="sellsCountLabel"></span></div>
+        <div class="sells-wrap">
+          <table class="sells-table">
+            <thead><tr><th>Ticker</th><th>Shares</th><th>Price</th><th>P/L</th><th>Reason</th><th>Time</th></tr></thead>
+            <tbody id="recentSellsBody"><tr><td colspan="6" class="empty">No sells yet</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="panel">
+        <div class="panel-title">Universe — Latest Signals<span class="count" id="universeCountLabel"></span></div>
+        <div id="universeGrid" class="card-grid"><div class="empty">Waiting for first scan…</div></div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="panel">
+        <div class="panel-title">AI Research Log</div>
+        <div class="log-panel" id="aiLog"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="assetModalOverlay" onclick="if (event.target === this) closeAssetModal()">
+  <div class="asset-modal">
+    <div class="asset-modal-header">
+      <div>
+        <div class="asset-modal-title" id="amTicker">—</div>
+        <div class="asset-modal-name" id="amName"></div>
+      </div>
+      <button class="asset-modal-close" onclick="closeAssetModal()">×</button>
+    </div>
+    <div class="asset-modal-badges" id="amBadges"></div>
+    <div class="asset-modal-chart-wrap">
+      <div class="asset-modal-legend" id="amLegend"></div>
+      <div class="asset-modal-chart" id="amChart"></div>
+    </div>
+    <div id="amSections"></div>
+  </div>
+</div>
+
+<script>
+let ws;
+let latestReports = {};
+let latestPositions = [];
+const seenLogKeys = new Set();
+const chartInstances = {}; // containerId -> LightweightCharts chart, so re-renders dispose cleanly
+
+function fmtUsd(n) {
+  if (n === undefined || n === null) return '—';
+  const sign = n < 0 ? '-' : '';
+  return sign + '$' + Math.abs(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function pnlClass(n) { return n >= 0 ? 'green' : 'red'; }
+function sigClass(sig) {
+  if (sig === 'STRONG BUY' || sig === 'BUY') return 'sig-buy';
+  if (sig === 'STRONG SELL' || sig === 'SELL') return 'sig-sell';
+  if (sig === 'HOLD') return 'sig-hold';
+  return 'sig-no-action';
+}
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(iso) ? iso : iso + 'Z');
+  return d.toLocaleString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+}
+
+// Mounts a small area-series sparkline, matching AITrading's own renderLightweightChart
+// helper in spirit (same library, same disposal-before-recreate pattern to avoid leaking
+// a chart instance per container on repeated re-renders) but scoped down to exactly what
+// these cards need -- one line, no crosshair/axis chrome, colored by the asset's own P/L
+// sign since that's more informative here than a fixed accent color.
+function renderSparkline(containerId, points, color) {
+  const el = document.getElementById(containerId);
+  if (!el || typeof LightweightCharts === 'undefined') return;
+  if (chartInstances[containerId]) {
+    chartInstances[containerId].remove();
+    delete chartInstances[containerId];
+  }
+  if (!points || points.length < 2) return;
+  const chart = LightweightCharts.createChart(el, {
+    width: el.clientWidth, height: el.clientHeight,
+    layout: { background: { color: 'transparent' }, textColor: 'transparent' },
+    grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+    rightPriceScale: { visible: false }, timeScale: { visible: false },
+    crosshair: { horzLine: { visible: false }, vertLine: { visible: false } },
+    handleScroll: false, handleScale: false,
+  });
+  const series = chart.addAreaSeries({
+    lineColor: color, lineWidth: 2, topColor: color + '33', bottomColor: color + '00',
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  });
+  series.setData(points);
+  chart.timeScale().fitContent();
+  chartInstances[containerId] = chart;
+}
+
+async function loadAssetSparkline(ticker, containerId, color) {
+  try {
+    const resp = await fetch(`/api/asset-history/${encodeURIComponent(ticker)}`);
+    const data = await resp.json();
+    const points = (data.points || []).map(p => ({ time: p.time, value: p.value }));
+    renderSparkline(containerId, points, color);
+  } catch (e) { console.error('loadAssetSparkline:', ticker, e); }
+}
+
+// Simple rolling close-price average, computed client-side from the same OHLC
+// history the candles use -- get_technicals() only returns ONE current SMA value,
+// not a full series, so this is the only way to draw an actual SMA line across
+// the chart rather than a single dot.
+function rollingSma(points, period) {
+  if (points.length < period) return [];
+  const out = [];
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    sum += points[i].close;
+    if (i >= period) sum -= points[i - period].close;
+    if (i >= period - 1) out.push({ time: points[i].time, value: sum / period });
+  }
+  return out;
+}
+
+// The detailed per-asset modal chart: real candlesticks, volume, rolling SMA50/
+// SMA200 overlays, and price lines for every level that actually drives the buy
+// decision (entry/stop/take-profit/fair-value/support/resistance) -- everything
+// the tiny card sparkline deliberately strips out (no axes, no crosshair, no
+// labels) to stay a glance-only indicator.
+function renderDetailedAssetChart(containerId, legendId, points, technicals, refLines) {
+  const el = document.getElementById(containerId);
+  const legendEl = document.getElementById(legendId);
+  if (chartInstances[containerId]) {
+    chartInstances[containerId].remove();
+    delete chartInstances[containerId];
+  }
+  legendEl.innerHTML = '';
+  if (!el || typeof LightweightCharts === 'undefined' || !points || points.length < 2) {
+    if (el) el.innerHTML = '<div class="empty" style="padding:60px 0;">No price history available</div>';
+    return;
+  }
+
+  const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+  const chart = LightweightCharts.createChart(el, {
+    width: el.clientWidth, height: el.clientHeight,
+    layout: { background: { color: 'transparent' }, textColor: isDark ? '#9ca3af' : '#4b5563' },
+    grid: { vertLines: { color: isDark ? '#1f2937' : '#e5e7eb' }, horzLines: { color: isDark ? '#1f2937' : '#e5e7eb' } },
+    rightPriceScale: { borderColor: isDark ? '#2a3a4e' : '#d8dee6' },
+    timeScale: { borderColor: isDark ? '#2a3a4e' : '#d8dee6', timeVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#10b981', downColor: '#ef4444', borderVisible: false,
+    wickUpColor: '#10b981', wickDownColor: '#ef4444',
+    priceScaleId: 'right',
+  });
+  candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.22 } });
+  candleSeries.setData(points.map(p => ({ time: p.time, open: p.open, high: p.high, low: p.low, close: p.close })));
+
+  const volSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' }, priceScaleId: 'vol',
+    color: isDark ? '#374151' : '#c5ccd6',
+  });
+  volSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+  volSeries.setData(points.map(p => ({
+    time: p.time, value: p.volume,
+    color: p.close >= p.open ? 'rgba(16,185,129,0.5)' : 'rgba(239,68,68,0.5)',
+  })));
+
+  const legend = [];
+  const sma50 = rollingSma(points, 50);
+  if (sma50.length) {
+    chart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(sma50);
+    legend.push(['#f59e0b', 'SMA 50']);
+  }
+  const sma200 = rollingSma(points, 200);
+  if (sma200.length) {
+    chart.addLineSeries({ color: '#8b5cf6', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(sma200);
+    legend.push(['#8b5cf6', 'SMA 200']);
+  }
+
+  const priceLine = (price, color, title, lineStyle) => {
+    if (price === null || price === undefined || price <= 0) return;
+    candleSeries.createPriceLine({
+      price, color, lineWidth: 1, lineStyle: lineStyle ?? LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true, title,
+    });
+    legend.push([color, `${title} $${price.toFixed(2)}`]);
+  };
+  if (refLines) {
+    priceLine(refLines.entry, '#3b82f6', 'Entry', LightweightCharts.LineStyle.Solid);
+    priceLine(refLines.stop, '#ef4444', 'Stop', LightweightCharts.LineStyle.Solid);
+    (refLines.takeProfits || []).forEach((tp, i) => priceLine(tp, '#10b981', `TP${i + 1}`));
+    priceLine(refLines.fairValue, '#06b6d4', 'Fair Value');
+  }
+  if (technicals) {
+    priceLine(technicals.support_level, isDark ? '#6b7280' : '#9ca3af', 'Support');
+    priceLine(technicals.resistance_level, isDark ? '#6b7280' : '#9ca3af', 'Resistance');
+  }
+
+  chart.timeScale().fitContent();
+  chartInstances[containerId] = chart;
+  legendEl.innerHTML = legend.map(([c, t]) => `<span><span class="sw" style="background:${c}"></span>${t}</span>`).join('');
+}
+
+function sigColors(sig) {
+  const map = {
+    'STRONG BUY':  {bg:'rgba(16,185,129,.18)', border:'#10b981', text:'#10b981'},
+    'BUY':         {bg:'rgba(52,211,153,.12)', border:'#34d399', text:'#34d399'},
+    'HOLD':        {bg:'rgba(251,191,36,.12)', border:'#fbbf24', text:'#fbbf24'},
+    'SELL':        {bg:'rgba(249,115,22,.15)', border:'#f97316', text:'#f97316'},
+    'STRONG SELL': {bg:'rgba(239,68,68,.18)',  border:'#ef4444', text:'#ef4444'},
+    'NO ACTION':   {bg:'rgba(107,114,128,.12)', border:'#6b7280', text:'#9ca3af'},
+  };
+  return map[(sig || '').toUpperCase()] || map['NO ACTION'];
+}
+
+let _amCurrentTicker = null;
+
+async function showAssetModal(ticker) {
+  _amCurrentTicker = ticker;
+  const r = latestReports[ticker];
+  const pos = latestPositions.find(p => p.ticker === ticker);
+  if (!r && !pos) return;
+
+  document.getElementById('amTicker').textContent = ticker;
+  document.getElementById('amName').textContent = (r && r.asset_name) || '';
+
+  const sig = pos ? 'HELD' : (r.signal || '').toUpperCase();
+  const sc = pos ? {bg:'rgba(59,130,246,.15)', border:'#3b82f6', text:'#3b82f6'} : sigColors(sig);
+  const conviction = r ? r.conviction_score.toFixed(1) : null;
+  const badges = [];
+  badges.push(`<span class="am-badge" style="background:${sc.bg};border:1px solid ${sc.border};color:${sc.text};">${sig}</span>`);
+  if (conviction !== null) badges.push(`<span class="am-badge am-badge-plain">Conviction ${conviction}/10</span>`);
+  if (r) badges.push(`<span class="am-badge am-badge-plain">Risk ${r.risk_level}</span>`);
+  if (r && r.rr !== null && r.rr !== undefined) {
+    const need = (r.required_rr !== null && r.required_rr !== undefined) ? ` (need ≥${r.required_rr.toFixed(2)})` : '';
+    badges.push(`<span class="am-badge am-badge-plain">R/R ${r.rr.toFixed(2)}${need}</span>`);
+  }
+  if (pos) badges.push(`<span class="am-badge am-badge-plain">${pos.shares.toFixed(6)} units · ${fmtUsd(pos.market_value)}</span>`);
+  const scanned = r ? fmtTime(r.generated_at) : '';
+  if (scanned) badges.push(`<span class="am-badge-time">Scanned ${scanned}</span>`);
+  document.getElementById('amBadges').innerHTML = badges.join('');
+
+  const entry = pos ? pos.entry_price : (r ? r.entry_price : null);
+  const stop = pos ? (pos.trailing_stop ?? pos.stop_loss) : (r ? r.stop_loss : null);
+  const takeProfits = pos ? (pos.take_profit_targets || []) : (r ? (r.take_profit_targets || []) : []);
+  const fairValue = r ? r.fair_value_estimate : null;
+
+  const sections = [];
+  const addSection = (title, body) => { if (body) sections.push(`<div class="asset-modal-section"><div class="asset-modal-section-title">${title}</div><div class="asset-modal-section-body">${body}</div></div>`); };
+  if (r) {
+    addSection('Asset Summary', r.asset_summary);
+    addSection('Thesis', r.thesis);
+    addSection('Technical Summary', r.technical_summary);
+    addSection('News &amp; Sentiment', r.news_summary);
+    addSection('Risk Factors', r.risk_factors);
+    if (r.fair_value_estimate) addSection('Fair Value / Margin of Safety',
+      `Fair value estimate: ${fmtUsd(r.fair_value_estimate)}` +
+      (r.margin_of_safety_pct !== undefined && r.margin_of_safety_pct !== null ? ` &nbsp;•&nbsp; Margin of safety: ${r.margin_of_safety_pct.toFixed(1)}%` : ''));
+    addSection('Recommended Action', r.recommended_action);
+    addSection('Reasoning', r.reasoning);
+  } else {
+    sections.push('<div class="asset-modal-section"><div class="asset-modal-section-body">No research report cached for this position yet.</div></div>');
+  }
+  document.getElementById('amSections').innerHTML = sections.join('');
+
+  document.getElementById('assetModalOverlay').classList.add('active');
+
+  // Fetch a real year of daily OHLCV (enough for a genuine SMA200 line) fresh
+  // every open rather than reusing the tiny 1mo card-sparkline fetch/cache.
+  try {
+    const resp = await fetch(`/api/asset-history/${encodeURIComponent(ticker)}?period=1y`);
+    const data = await resp.json();
+    if (_amCurrentTicker !== ticker) return; // modal closed/switched while this was in flight
+    renderDetailedAssetChart('amChart', 'amLegend', data.points || [], data.technicals,
+      { entry, stop, takeProfits, fairValue });
+  } catch (e) {
+    console.error('showAssetModal chart fetch:', ticker, e);
+  }
+}
+
+function closeAssetModal() {
+  _amCurrentTicker = null;
+  document.getElementById('assetModalOverlay').classList.remove('active');
+  if (chartInstances['amChart']) { chartInstances['amChart'].remove(); delete chartInstances['amChart']; }
+}
+
+function updatePortfolio(p) {
+  document.getElementById('totalValue').textContent = fmtUsd(p.total_value);
+  document.getElementById('cash').textContent = fmtUsd(p.cash);
+  const dayPnlEl = document.getElementById('dayPnl');
+  dayPnlEl.textContent = fmtUsd(p.day_pnl);
+  dayPnlEl.className = 'stat-value ' + pnlClass(p.day_pnl);
+  const totalPnlEl = document.getElementById('totalPnl');
+  totalPnlEl.textContent = fmtUsd(p.total_pnl) + ' (' + p.total_pnl_pct.toFixed(2) + '%)';
+  totalPnlEl.className = 'stat-value ' + pnlClass(p.total_pnl);
+  document.getElementById('posCount').textContent = p.positions.length;
+  document.getElementById('posCountLabel').textContent = p.positions.length ? `(${p.positions.length})` : '';
+
+  latestPositions = p.positions;
+  const container = document.getElementById('positionsGrid');
+  if (p.positions.length === 0) {
+    container.innerHTML = '<div class="empty">No open positions</div>';
+    return;
+  }
+  container.innerHTML = p.positions.map(pos => {
+    const chartId = 'posChart-' + pos.ticker.replace('/', '');
+    const pnlColor = pos.lifetime_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const stop = pos.trailing_stop !== null && pos.trailing_stop !== undefined ? pos.trailing_stop : pos.stop_loss;
+    const trailNote = (pos.trailing_stop !== null && pos.trailing_stop !== undefined && pos.final_trail_pct)
+      ? ` <span style="color:var(--text-muted);font-weight:500;">(AI trail→${pos.final_trail_pct.toFixed(1)}%)</span>` : '';
+    return `<div class="asset-card clickable" onclick="showAssetModal('${pos.ticker}')">
+      <div class="asset-card-header">
+        <div><div class="asset-ticker">${pos.ticker}</div><div class="asset-name">${pos.shares.toFixed(6)} units</div></div>
+        <button class="sell-btn" onclick="event.stopPropagation(); manualSell('${pos.ticker}')">Sell</button>
+      </div>
+      <div class="asset-stats-row">
+        <div class="asset-stat"><div class="asset-stat-label">Entry</div><div class="asset-stat-value">${fmtUsd(pos.entry_price)}</div></div>
+        <div class="asset-stat"><div class="asset-stat-label">Current</div><div class="asset-stat-value">${fmtUsd(pos.current_price)}</div></div>
+        <div class="asset-stat"><div class="asset-stat-label">P/L</div><div class="asset-stat-value" style="color:${pnlColor}">${fmtUsd(pos.lifetime_pnl)} (${pos.unrealized_pnl_pct.toFixed(1)}%)</div></div>
+      </div>
+      <div class="asset-chart-box" id="${chartId}"></div>
+      <div class="asset-stats-row">
+        <div class="asset-stat"><div class="asset-stat-label">Stop</div><div class="asset-stat-value" style="font-size:12.5px;">${fmtUsd(stop)}${trailNote}</div></div>
+        <div class="asset-stat"><div class="asset-stat-label">Market Value</div><div class="asset-stat-value" style="font-size:12.5px;">${fmtUsd(pos.market_value)}</div></div>
+      </div>
+    </div>`;
+  }).join('');
+  p.positions.forEach(pos => {
+    const chartId = 'posChart-' + pos.ticker.replace('/', '');
+    const color = pos.lifetime_pnl >= 0 ? '#10b981' : '#ef4444';
+    loadAssetSparkline(pos.ticker, chartId, color);
+  });
+}
+
+function updateUniverse(reports) {
+  latestReports = reports;
+  // A held ticker belongs in the Positions panel, not here -- it kept showing up in
+  // both places (just tagged "· held") until this filter, which was confusing since
+  // this grid's whole purpose is unheld candidates.
+  const tickers = Object.keys(reports).filter(t => !latestPositions.some(p => p.ticker === t));
+  const container = document.getElementById('universeGrid');
+  const countLabel = document.getElementById('universeCountLabel');
+  if (tickers.length === 0) {
+    container.innerHTML = '<div class="empty">Waiting for first scan…</div>';
+    countLabel.textContent = '';
+    return;
+  }
+  countLabel.textContent = `(${tickers.length})`;
+  const rows = tickers.map(t => reports[t]).sort((a, b) => b.conviction_score - a.conviction_score);
+  container.innerHTML = rows.map(r => {
+    const chartId = 'uniChart-' + r.ticker.replace('/', '');
+    const hasRr = r.rr !== null && r.rr !== undefined;
+    const rrQualifies = hasRr && r.required_rr !== null && r.required_rr !== undefined && r.rr >= r.required_rr;
+    const rrColor = hasRr ? (rrQualifies ? 'var(--green)' : 'var(--text-primary)') : 'var(--text-muted)';
+    const rrText = hasRr ? r.rr.toFixed(2) : '—';
+    const rrNeed = (r.required_rr !== null && r.required_rr !== undefined) ? `need ≥${r.required_rr.toFixed(2)}` : '';
+    return `<div class="asset-card clickable" onclick="showAssetModal('${r.ticker}')">
+      <div class="asset-card-header">
+        <div><div class="asset-ticker">${r.ticker}</div><div class="asset-name">${r.asset_name}</div></div>
+        <span class="asset-sig ${sigClass(r.signal)}">${r.signal}${r.is_fallback ? ' ⚠' : ''}</span>
+      </div>
+      <div class="asset-stats-row">
+        <div class="asset-stat"><div class="asset-stat-label">Conviction</div><div class="asset-stat-value">${r.conviction_score.toFixed(1)}/10</div></div>
+        <div class="asset-stat"><div class="asset-stat-label">Entry</div><div class="asset-stat-value">${fmtUsd(r.entry_price)}</div></div>
+        <div class="asset-stat"><div class="asset-stat-label">Fair Value</div><div class="asset-stat-value">${fmtUsd(r.fair_value_estimate)}</div></div>
+        <div class="asset-stat">
+          <div class="asset-stat-label">R/R</div>
+          <div class="asset-stat-value" style="color:${rrColor}">${rrText}</div>
+          <div style="font-size:9px;color:var(--text-muted);margin-top:1px;">${rrNeed}</div>
+        </div>
+      </div>
+      <div class="asset-chart-box" id="${chartId}"></div>
+      <div class="asset-thesis">${r.thesis || ''}</div>
+    </div>`;
+  }).join('');
+  rows.forEach(r => {
+    const chartId = 'uniChart-' + r.ticker.replace('/', '');
+    loadAssetSparkline(r.ticker, chartId, '#3b82f6');
+  });
+}
+
+function updateRecentSells(sells) {
+  const body = document.getElementById('recentSellsBody');
+  const countLabel = document.getElementById('sellsCountLabel');
+  if (!sells || sells.length === 0) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">No sells yet</td></tr>';
+    countLabel.textContent = '';
+    return;
+  }
+  countLabel.textContent = `(${sells.length})`;
+  body.innerHTML = sells.map(s => `<tr>
+    <td>${s.ticker}</td>
+    <td>${Number(s.shares).toFixed(6)}</td>
+    <td>${fmtUsd(s.price)}</td>
+    <td class="${pnlClass(s.pnl || 0)}">${fmtUsd(s.pnl)}</td>
+    <td class="sells-reason">${s.reason || ''}</td>
+    <td>${fmtTime(s.timestamp)}</td>
+  </tr>`).join('');
+}
+
+async function refreshRecentSells() {
+  try {
+    const resp = await fetch('/api/recent-sells');
+    const data = await resp.json();
+    updateRecentSells(data.sells || []);
+  } catch (e) { console.error('refreshRecentSells:', e); }
+}
+
+function appendAiLog(entry) {
+  const key = entry.time + entry.phase + entry.content;
+  if (seenLogKeys.has(key)) return;
+  seenLogKeys.add(key);
+  const div = document.createElement('div');
+  div.className = 'log-row';
+  const levelClass = entry.level === 'ERROR' ? 'log-error' : (entry.level === 'WARNING' ? 'log-warning' : '');
+  div.innerHTML = `<span class="log-time">${entry.time}</span><span class="log-phase">[${entry.phase}]</span>` +
+    `<span class="${levelClass}">${entry.content}</span>`;
+  const log = document.getElementById('aiLog');
+  log.insertBefore(div, log.firstChild);
+  while (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+async function manualSell(ticker) {
+  if (!confirm(`Sell entire ${ticker} position?`)) return;
+  const resp = await fetch(`/api/manual-sell/${encodeURIComponent(ticker)}`, {method: 'POST'});
+  const data = await resp.json();
+  if (data.status !== 'ok') alert('Sell failed — check the AI log for details.');
+}
+
+function handleMessage(msg) {
+  if (msg.type === 'init') {
+    updatePortfolio(msg.portfolio);
+    updateUniverse(msg.reports || {});
+    updateRecentSells(msg.recent_sells || []);
+    document.getElementById('paperBadge').textContent = msg.paper_trading ? 'PAPER' : 'LIVE';
+    document.getElementById('paperBadge').style.background = msg.paper_trading ? 'var(--green-bg)' : 'var(--red-bg)';
+    document.getElementById('paperBadge').style.color = msg.paper_trading ? 'var(--green)' : 'var(--red)';
+    (msg.ai_log || []).forEach(appendAiLog);
+  } else if (msg.type === 'portfolio') {
+    updatePortfolio(msg.portfolio);
+    refreshRecentSells();
+  } else if (msg.type === 'reports') {
+    updateUniverse(msg.reports || {});
+  } else if (msg.type === 'ai_log') {
+    appendAiLog(msg.entry);
+  }
+  // 'heartbeat' needs no handling of its own -- receiving ANY message (including
+  // this one) already resets lastMessageAt in ws.onmessage below, which is the
+  // entire point of it existing.
+}
+
+// The server broadcasts a heartbeat every 20s (see heartbeat_loop in web/app.py) --
+// with zero open positions and between scan cycles, a genuinely healthy connection
+// can otherwise go 10+ minutes with no real data message at all, so "no message
+// received recently" can't by itself mean "connection is dead." A missed heartbeat
+// can. STALE_THRESHOLD_MS is well over 2x the server's own interval so one slow
+// tick never false-positives.
+const STALE_THRESHOLD_MS = 50000;
+const POLL_INTERVAL_MS = 10000;
+let lastMessageAt = Date.now();
+let isStale = false;
+let pollTimer = null;
+let bannerTickTimer = null;
+
+function fmtAgo(ms) {
+  const secs = Math.max(0, Math.floor(ms / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  return `${Math.floor(secs / 60)}m ${secs % 60}s ago`;
+}
+
+function enterStaleState() {
+  if (isStale) return;
+  isStale = true;
+  document.getElementById('connStatus').textContent = 'Connection stale';
+  const banner = document.getElementById('wsDisconnectedBanner');
+  banner.style.display = 'flex';
+  const frozenAt = lastMessageAt;
+  bannerTickTimer = setInterval(() => {
+    document.getElementById('wsFrozenSince').textContent = fmtAgo(Date.now() - frozenAt);
+  }, 1000);
+  pollTimer = setInterval(pollFallback, POLL_INTERVAL_MS);
+  pollFallback(); // don't wait a full interval for the first fallback fetch
+  // Nudge the underlying socket closed -- harmless if it's already dead, and gives
+  // a half-open connection (TCP dead, no close event ever fired) a chance to
+  // actually tear down and let the existing onclose/reconnect loop take over.
+  try { ws.close(); } catch (e) {}
+}
+
+function exitStaleState() {
+  if (!isStale) return;
+  isStale = false;
+  document.getElementById('wsDisconnectedBanner').style.display = 'none';
+  clearInterval(pollTimer); pollTimer = null;
+  clearInterval(bannerTickTimer); bannerTickTimer = null;
+}
+
+async function pollFallback() {
+  try {
+    const resp = await fetch('/api/dashboard-poll');
+    const data = await resp.json();
+    handleMessage({ ...data, type: 'init' });
+  } catch (e) { console.error('pollFallback:', e); }
+}
+
+setInterval(() => {
+  if (Date.now() - lastMessageAt > STALE_THRESHOLD_MS) enterStaleState();
+}, 5000);
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => {
+    lastMessageAt = Date.now();
+    exitStaleState();
+    document.getElementById('connStatus').textContent = 'Connected';
+  };
+  ws.onmessage = (event) => {
+    lastMessageAt = Date.now();
+    exitStaleState();
+    handleMessage(JSON.parse(event.data));
+  };
+  ws.onclose = () => {
+    if (!isStale) document.getElementById('connStatus').textContent = 'Reconnecting…';
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => { ws.close(); };
+}
+connect();
+
+// ── Update Available badge ────────────────────────────────────────────────────
+let _updateStatus = null;
+async function fetchUpdateStatus() {
+  try {
+    const resp = await fetch('/api/update-status');
+    if (resp.ok) {
+      _updateStatus = await resp.json();
+      renderUpdateBadge();
+    }
+  } catch (e) { /* no badge shown on any fetch error */ }
+}
+fetchUpdateStatus();
+setInterval(fetchUpdateStatus, 60000);
+
+function renderUpdateBadge() {
+  const badge = document.getElementById('updateAvailableBadge');
+  if (!badge || !_updateStatus) return;
+  if (!_updateStatus.available) { badge.style.display = 'none'; return; }
+  const color = _updateStatus.severity === 'critical' ? 'var(--red)' : 'var(--cyan)';
+  badge.style.display = 'inline-flex';
+  badge.style.borderColor = color;
+  badge.innerHTML = `<span style="color:${color};">&#9679;</span> Update available: ${_updateStatus.latest}`;
+}
+
+function openUpdatePanel() {
+  if (!_updateStatus) return;
+  document.getElementById('amTicker').textContent = 'Update Available';
+  document.getElementById('amName').textContent = '';
+  document.getElementById('amBadges').innerHTML = '';
+  document.getElementById('amLegend').innerHTML = '';
+  document.getElementById('amChart').innerHTML = '';
+  document.getElementById('amSections').innerHTML = `
+    <div style="padding:12px;">
+      <p style="margin:0 0 8px 0;">Current: <b>${_updateStatus.current}</b> &rarr; Latest: <b>${_updateStatus.latest}</b></p>
+      <p style="margin:0 0 12px 0;color:var(--text-muted);white-space:pre-wrap;">${_updateStatus.notes}</p>
+      <p style="margin:0 0 12px 0;background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.4);padding:8px 12px;border-radius:6px;font-size:13px;">
+        &#9888; Applying will briefly restart the trading engine (~10s).
+      </p>
+      <button id="applyUpdateBtn" onclick="applyUpdate()"
+              style="background:var(--accent);color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">
+        Apply Update
+      </button>
+      <span id="applyUpdateStatus" style="margin-left:10px;font-size:12px;color:var(--text-muted);"></span>
+    </div>
+  `;
+  document.getElementById('assetModalOverlay').classList.add('active');
+}
+
+async function applyUpdate() {
+  const btn = document.getElementById('applyUpdateBtn');
+  const statusEl = document.getElementById('applyUpdateStatus');
+  btn.disabled = true;
+  statusEl.textContent = 'Applying…';
+  try {
+    const resp = await fetch('/api/apply-update', { method: 'POST' });
+    const data = await resp.json();
+    if (data.status === 'applying') {
+      statusEl.textContent = `Applying ${data.target_version} — service restarting…`;
+      pollUntilBackUpThenReload();
+    } else if (data.status === 'already_applying') {
+      statusEl.textContent = 'Already applying — waiting for it to finish…';
+      pollUntilBackUpThenReload();
+    } else {
+      statusEl.textContent = `Error: ${data.detail}`;
+      btn.disabled = false;
+    }
+  } catch (e) {
+    statusEl.textContent = 'Error: request failed';
+    btn.disabled = false;
+  }
+}
+
+function pollUntilBackUpThenReload() {
+  const statusEl = document.getElementById('applyUpdateStatus');
+  let attempts = 0;
+  const maxAttempts = 30;
+  setTimeout(function poll() {
+    attempts++;
+    fetch('/api/update-status')
+      .then(resp => {
+        if (resp.ok) { location.reload(); }
+        else if (attempts < maxAttempts) { setTimeout(poll, 2000); }
+        else if (statusEl) { statusEl.textContent = 'Still restarting — reload the page manually when ready.'; }
+      })
+      .catch(() => {
+        if (attempts < maxAttempts) { setTimeout(poll, 2000); }
+        else if (statusEl) { statusEl.textContent = 'Still restarting — reload the page manually when ready.'; }
+      });
+  }, 3000);
+}
+</script>
+</body>
+</html>

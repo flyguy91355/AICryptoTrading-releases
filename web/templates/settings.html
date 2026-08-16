@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0a0e17">
+<title>Settings — Hilton's AI Crypto Trading</title>
+<script>
+(function() {
+  const stored = localStorage.getItem('theme');
+  document.documentElement.setAttribute('data-theme', stored || 'dark');
+})();
+</script>
+<style>
+:root {
+  --bg-primary: #0a0e17; --bg-secondary: #111827; --bg-card: #1a2332; --bg-input: #0d1421;
+  --border: #2a3a4e; --border-light: #374151; --text-primary: #e5e7eb; --text-secondary: #9ca3af;
+  --text-muted: #6b7280; --accent: #3b82f6; --accent-hover: #2563eb; --green: #10b981; --green-bg: rgba(16,185,129,0.1);
+  --green-border: rgba(16,185,129,0.3); --red: #ef4444; --red-bg: rgba(239,68,68,0.1); --red-border: rgba(239,68,68,0.3);
+  --cyan: #06b6d4;
+}
+:root[data-theme="light"] {
+  --bg-primary: #f3f5f8; --bg-secondary: #ffffff; --bg-card: #ffffff; --bg-input: #ffffff;
+  --border: #d8dee6; --border-light: #c5ccd6; --text-primary: #10151f; --text-secondary: #4b5563;
+  --text-muted: #6b7280; --accent: #2563eb; --accent-hover: #1d4ed8; --green: #059669; --green-bg: rgba(5,150,105,0.10);
+  --green-border: rgba(5,150,105,0.30); --red: #dc2626; --red-bg: rgba(220,38,38,0.10); --red-border: rgba(220,38,38,0.30);
+  --cyan: #0891b2;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg-primary); color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; font-size: 14px; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px;
+  background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+.logo { font-size: 17px; font-weight: 700; background: linear-gradient(90deg, var(--accent), var(--cyan));
+  -webkit-background-clip: text; background-clip: text; color: transparent; }
+.back-link { color: var(--text-secondary); text-decoration: none; font-size: 13px; font-weight: 600;
+  padding: 6px 10px; border-radius: 6px; }
+.back-link:hover { background: var(--bg-card); color: var(--text-primary); }
+main { padding: 22px; max-width: 900px; margin: 0 auto; }
+.panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 18px; overflow: hidden; }
+.panel-title { padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: 12.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); }
+.field-grid { display: grid; grid-template-columns: 1fr; gap: 0; }
+.field-row { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start;
+  padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.field-row:last-child { border-bottom: none; }
+.field-label { font-size: 13px; font-weight: 600; padding-top: 7px; }
+.field-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
+.field-input-wrap { display: flex; flex-direction: column; }
+input[type=number], input[type=text], select {
+  background: var(--bg-input); border: 1px solid var(--border-light); color: var(--text-primary);
+  border-radius: 6px; padding: 7px 10px; font-size: 13px; width: 220px; font-variant-numeric: tabular-nums;
+}
+input:focus, select:focus { outline: none; border-color: var(--accent); }
+.field-readonly { padding: 7px 10px; font-size: 13px; color: var(--text-muted); }
+.actions { position: sticky; bottom: 0; background: var(--bg-secondary); border-top: 1px solid var(--border);
+  padding: 14px 22px; display: flex; align-items: center; gap: 14px; margin: 0 -22px; }
+button.save-btn { background: var(--accent); color: #fff; border: none; border-radius: 7px; padding: 10px 22px;
+  font-size: 14px; font-weight: 700; cursor: pointer; }
+button.save-btn:hover { background: var(--accent-hover); }
+button.save-btn:disabled { opacity: .5; cursor: default; }
+#saveStatus { font-size: 13px; color: var(--text-muted); }
+#saveStatus.ok { color: var(--green); }
+#saveStatus.err { color: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Hilton's AI Crypto Trading — Settings</div>
+  <a class="back-link" href="/">← Back to Dashboard</a>
+</header>
+<main>
+  <div class="panel">
+    <div class="panel-title">Display</div>
+    <div class="field-grid">
+      <div class="field-row">
+        <div class="field-label">Theme</div>
+        <div class="field-input-wrap">
+          <select id="themeSelect" onchange="setTheme(this.value)">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+          <div class="field-desc">Applies instantly, per-device (stored in this browser only) — no Save Settings click needed.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="fields"></div>
+  <div class="actions">
+    <button class="save-btn" id="saveBtn" onclick="saveSettings()">Save Settings</button>
+    <span id="saveStatus"></span>
+  </div>
+</main>
+
+<script>
+// Each entry: [section, key, label, type, description, options?]
+// type: "float" | "int" | "bool" | "select"
+const FIELD_GROUPS = [
+  {
+    title: "Trading",
+    fields: [
+      ["trading", "auto_execute", "Auto-Execute Trades", "bool",
+        "When on, a qualifying BUY/STRONG BUY signal executes immediately. When off, the scan still runs and logs signals, but nothing is bought."],
+      ["scan", "interval_minutes", "Scan Interval (minutes)", "int",
+        "How often the full universe is re-analyzed. Crypto trades 24/7, so this is the only scan schedule (no market-hours concept)."],
+      ["portfolio", "max_positions", "Max Positions", "int",
+        "Sizing guideline for how many concurrent positions to aim for."],
+    ],
+  },
+  {
+    title: "Risk Management",
+    fields: [
+      ["risk_management", "max_position_pct", "Max Position Size (%)", "float",
+        "Cap on any single position, as a percentage of total portfolio value."],
+      ["risk_management", "max_loss_per_trade_pct", "Max Loss Per Trade (%)", "float",
+        "Max dollar risk (entry-to-stop) per trade, as a percentage of portfolio value."],
+      ["risk_management", "min_cash_reserve_pct", "Min Cash Reserve (%)", "float",
+        "Cash buffer that's never spent on a new position — crypto's volatility argues for a larger buffer than equities."],
+      ["risk_management", "daily_loss_limit_pct", "Daily Loss Limit (%)", "float",
+        "Halts new buys for the rest of the day once realized+unrealized loss crosses this."],
+      ["risk_management", "drawdown_halt_pct", "Drawdown Halt (%)", "float",
+        "Mildest drawdown severity level — stops new buys."],
+      ["risk_management", "drawdown_defensive_pct", "Drawdown Defensive (%)", "float",
+        "Middle drawdown severity level — more defensive posture."],
+      ["risk_management", "drawdown_exit_review_pct", "Drawdown Exit Review (%)", "float",
+        "Most severe drawdown level — existing positions get reviewed for exit."],
+      ["risk_management", "trailing_stop_follow_tp_targets", "Trailing Stop Follows T1/T2", "bool",
+        "Off: the graduated trailing stop draws a straight line from entry to T3. On: it bends through T1/T2 as checkpoints too."],
+    ],
+  },
+  {
+    title: "Take Profit & Stop Loss (Mechanical Fallback)",
+    fields: [
+      ["take_profit", "stop_loss_pct", "Stop Loss (%)", "float",
+        "Flat fallback stop distance below entry — only used when AI-Chosen Stop/TP (below) is off, or the AI omits a value."],
+      ["take_profit", "t1_pct", "Take-Profit T1 (%)", "float", "Flat fallback first target, % above entry."],
+      ["take_profit", "t2_pct", "Take-Profit T2 (%)", "float", "Flat fallback second target, % above entry."],
+      ["take_profit", "t3_pct", "Take-Profit T3 (%)", "float", "Flat fallback third/final target, % above entry."],
+      ["take_profit", "final_tranche_trail_pct", "Final Trail Width Fallback (%)", "float",
+        "Tightest trailing-stop width once a position nears T3 — fallback for a position with no AI-chosen value."],
+    ],
+  },
+  {
+    title: "Research & Signal Gates",
+    fields: [
+      ["research", "min_conviction_score", "Min Conviction Score", "float",
+        "Claude's conviction (1-10) must clear this for a BUY/STRONG BUY signal to qualify."],
+      ["research", "min_risk_reward_ratio", "Min Risk/Reward Ratio", "float",
+        "Required reward:risk at the conviction minimum — scales down modestly for higher conviction, floored by rr_floor below."],
+      ["research", "rr_conviction_step", "R/R Conviction Step", "float",
+        "How much the required R/R drops per conviction point above the minimum."],
+      ["research", "rr_floor", "R/R Floor", "float", "The required R/R never drops below this, no matter how high conviction is."],
+      ["research", "long_term_trend_years", "Long-Term Trend Years", "int",
+        "Years of price history used to judge a genuine breakout vs. a bounce toward an old high/low."],
+      ["research", "model_quick_scan", "Research Model", "select",
+        "Which Claude model runs every scan-cycle analysis.",
+        ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]],
+    ],
+  },
+  {
+    title: "AI-Chosen Stop-Loss / Take-Profit / Trailing Stop",
+    fields: [
+      ["research", "ai_chosen_stop_tp_enabled", "AI-Chosen Stop/TP/Trail Enabled", "bool",
+        "When on, Claude judges the stop-loss, all 3 take-profit targets, and the final trailing-stop width from each asset's own real support/resistance/volatility data, instead of one flat percentage applied to every asset."],
+      ["research", "ai_stop_loss_min_pct", "AI Stop-Loss Min (%)", "float", "Tightest stop Claude may choose, as % below entry."],
+      ["research", "ai_stop_loss_max_pct", "AI Stop-Loss Max (%)", "float", "Widest stop Claude may choose, as % below entry."],
+      ["research", "ai_final_trail_min_pct", "AI Final Trail Min (%)", "float",
+        "Tightest final trailing-stop width Claude may choose, once a position has run deep into profit near T3."],
+      ["research", "ai_final_trail_max_pct", "AI Final Trail Max (%)", "float",
+        "Widest final trailing-stop width Claude may choose."],
+    ],
+  },
+];
+
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('theme', theme);
+}
+document.getElementById('themeSelect').value = document.documentElement.getAttribute('data-theme') || 'dark';
+
+let currentConfig = {};
+
+function fieldId(section, key) { return `f_${section}_${key}`; }
+
+function renderFields() {
+  const container = document.getElementById('fields');
+  container.innerHTML = FIELD_GROUPS.map(group => `
+    <div class="panel">
+      <div class="panel-title">${group.title}</div>
+      <div class="field-grid">
+        ${group.fields.map(([section, key, label, type, desc, options]) => {
+          const id = fieldId(section, key);
+          const value = (currentConfig[section] || {})[key];
+          let inputHtml;
+          if (type === 'bool') {
+            inputHtml = `<select id="${id}"><option value="true" ${value ? 'selected' : ''}>Enabled</option><option value="false" ${!value ? 'selected' : ''}>Disabled</option></select>`;
+          } else if (type === 'select') {
+            inputHtml = `<select id="${id}">${options.map(o => `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+          } else {
+            const step = type === 'int' ? '1' : 'any';
+            inputHtml = `<input type="number" step="${step}" id="${id}" value="${value !== undefined ? value : ''}">`;
+          }
+          return `<div class="field-row">
+            <div class="field-label">${label}</div>
+            <div class="field-input-wrap">${inputHtml}<div class="field-desc">${desc}</div></div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+async function loadSettings() {
+  const resp = await fetch('/api/settings');
+  currentConfig = await resp.json();
+  renderFields();
+}
+
+async function saveSettings() {
+  const updates = {};
+  FIELD_GROUPS.forEach(group => group.fields.forEach(([section, key, label, type]) => {
+    const el = document.getElementById(fieldId(section, key));
+    let value;
+    if (type === 'bool') value = el.value === 'true';
+    else if (type === 'int') value = parseInt(el.value, 10);
+    else if (type === 'float') value = parseFloat(el.value);
+    else value = el.value;
+    updates[`${section}.${key}`] = value;
+  }));
+
+  const btn = document.getElementById('saveBtn');
+  const status = document.getElementById('saveStatus');
+  btn.disabled = true;
+  status.textContent = 'Saving…';
+  status.className = '';
+  try {
+    const resp = await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(updates),
+    });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      status.textContent = 'Saved — applied immediately, no restart needed.';
+      status.className = 'ok';
+      currentConfig = data.config;
+    } else {
+      status.textContent = 'Save failed: ' + (data.error || 'unknown error');
+      status.className = 'err';
+    }
+  } catch (e) {
+    status.textContent = 'Save failed: ' + e;
+    status.className = 'err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+loadSettings();
+</script>
+</body>
+</html>
