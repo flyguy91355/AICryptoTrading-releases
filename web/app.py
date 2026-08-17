@@ -890,7 +890,7 @@ async def get_perf_history():
     ):
         points = _perf_history_cache
     else:
-        points = await state.broker.get_portfolio_history_daily()
+        points = await state.order_manager.broker.get_portfolio_history_daily()
         _perf_history_cache = points
         _perf_history_cache_time = now
 
