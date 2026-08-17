@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import anthropic
 
 from src.data.market_data import MarketDataFetcher
-from src.research.asset_profile import compute_asset_stats, build_asset_profile_prompt
+from src.research.asset_profile import compute_asset_stats, build_asset_profile_prompt, build_sma_period_prompt
 from src.utils.config import load_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -63,8 +63,24 @@ def _is_fresh(entry: dict, refresh_days: int) -> bool:
     return datetime.now(timezone.utc) - ts < timedelta(days=refresh_days)
 
 
+async def _call_claude(client, model: str, prompt: str, max_tokens: int) -> str | None:
+    """Shared thin wrapper: makes one Claude call, returns stripped text or None on failure."""
+    try:
+        message = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        block = next((b for b in message.content if hasattr(b, "text")), None)
+        return block.text.strip() if block and block.text.strip() else None
+    except Exception as e:
+        logger.warning("Claude call failed: %s", e)
+        return None
+
+
 async def generate_all_profiles(config: dict, force: bool = False, only_ticker: str | None = None) -> dict:
-    """Returns {ticker: {"profile": str, "generated_at": iso, "stats_summary": {...}}}.
+    """Returns {ticker: {"profile": str, "generated_at": iso, "stats_summary": {...},
+    "sma_fast_period": int, "sma_slow_period": int}}.
     Real function used by both the CLI script and the in-app scheduled refresh --
     kept here (not duplicated in web/app.py) so there's one source of truth."""
     market_data = MarketDataFetcher(config)
@@ -75,6 +91,7 @@ async def generate_all_profiles(config: dict, force: bool = False, only_ticker: 
     client = anthropic.Anthropic(api_key=api_key)
     model = config.get("research", {}).get("model_quick_scan", "claude-haiku-4-5")
     refresh_days = config.get("research", {}).get("asset_profile_refresh_days", 7)
+    sma_mode = config.get("research", {}).get("sma_mode", "auto")
 
     profiles = _load_existing()
     universe = config.get("universe", [])
@@ -103,24 +120,46 @@ async def generate_all_profiles(config: dict, force: bool = False, only_ticker: 
             logger.info("%s: not enough history yet for a real profile (%d bars) -- skipping", ticker, len(bars))
             continue
 
-        prompt = build_asset_profile_prompt(ticker, name, stats)
-        try:
-            message = await asyncio.to_thread(
-                lambda: client.messages.create(
-                    model=model, max_tokens=400, messages=[{"role": "user", "content": prompt}],
-                )
-            )
-            text_block = next((b for b in message.content if hasattr(b, "text")), None)
-            if not text_block or not text_block.text.strip():
-                raise ValueError("Empty profile response")
-            profile_text = text_block.text.strip()
-        except Exception as e:
-            logger.warning("%s: Claude profile generation failed (%s) -- leaving prior profile in place", ticker, e)
+        # Profile call (character summary for ANALYSIS_PROMPT)
+        profile_text = await _call_claude(
+            client, model, build_asset_profile_prompt(ticker, name, stats), max_tokens=400,
+        )
+        if not profile_text:
+            logger.warning("%s: Claude profile generation failed -- leaving prior profile in place", ticker)
             continue
+
+        # SMA period call (only for auto mode — flat/manual don't need per-asset AI choices)
+        sma_fast, sma_slow = 50, 200  # safe defaults if call skipped or fails
+        if sma_mode == "auto":
+            await asyncio.sleep(0.5)  # brief pause between the two calls for this ticker
+            sma_text = await _call_claude(
+                client, model, build_sma_period_prompt(ticker, name, stats), max_tokens=50,
+            )
+            if sma_text:
+                import re, json as _json
+                try:
+                    # Accept raw JSON or a JSON object embedded in light prose
+                    m = re.search(r'\{[^}]+\}', sma_text)
+                    if m:
+                        parsed = _json.loads(m.group())
+                        fast_raw = int(parsed.get("sma_fast", 50))
+                        slow_raw = int(parsed.get("sma_slow", 200))
+                        # Enforce the guard: fast < slow, both in sane ranges
+                        fast_raw = max(15, min(100, fast_raw))
+                        slow_raw = max(80, min(300, slow_raw))
+                        if slow_raw >= fast_raw + 40:
+                            sma_fast, sma_slow = fast_raw, slow_raw
+                            logger.info("%s: AI chose SMA%d / SMA%d", ticker, sma_fast, sma_slow)
+                        else:
+                            logger.warning("%s: AI SMA periods too close (%d/%d) -- keeping defaults", ticker, fast_raw, slow_raw)
+                except Exception as e:
+                    logger.warning("%s: SMA period parse failed (%s) -- keeping defaults", ticker, e)
 
         profiles[ticker] = {
             "profile": profile_text,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "sma_fast_period": sma_fast,
+            "sma_slow_period": sma_slow,
             "stats_summary": {
                 "years": stats.years,
                 "high": stats.high, "low": stats.low, "pct_off_high": stats.pct_off_high,
@@ -130,7 +169,7 @@ async def generate_all_profiles(config: dict, force: bool = False, only_ticker: 
                 "max_drawdown_pct": stats.max_drawdown_pct,
             },
         }
-        logger.info("%s: profile generated (%d chars)", ticker, len(profile_text))
+        logger.info("%s: profile generated (%d chars), SMA%d/SMA%d", ticker, len(profile_text), sma_fast, sma_slow)
         await asyncio.sleep(1)  # small pacing gap, same courtesy the main scan loop uses
 
     PROFILES_PATH.parent.mkdir(parents=True, exist_ok=True)

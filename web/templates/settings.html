@@ -158,6 +158,18 @@ const FIELD_GROUPS = [
     ],
   },
   {
+    title: "Chart SMA Periods",
+    fields: [
+      ["research", "sma_mode", "SMA Mode", "select",
+        "Flat: always SMA 50 / SMA 200 on every chart. Manual: use the two period numbers below. Auto: Claude picks asset-specific periods from 3-year history (stored with each asset's profile, refreshed weekly).",
+        ["auto", "flat", "manual"]],
+      ["research", "sma_fast_period", "Fast SMA Period (Manual mode)", "int",
+        "Short-term trend lookback in days. Only used when SMA Mode is Manual."],
+      ["research", "sma_slow_period", "Slow SMA Period (Manual mode)", "int",
+        "Long-term trend lookback in days. Only used when SMA Mode is Manual. Must be at least 40 days longer than the fast period."],
+    ],
+  },
+  {
     title: "AI-Chosen Stop-Loss / Take-Profit / Trailing Stop",
     fields: [
       ["research", "ai_chosen_stop_tp_enabled", "AI-Chosen Stop/TP/Trail Enabled", "bool",

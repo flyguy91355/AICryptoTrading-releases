@@ -197,6 +197,34 @@ def build_asset_profile_prompt(ticker: str, asset_name: str, stats: AssetStats) 
     )
 
 
+SMA_PERIOD_PROMPT = """\
+Choose two chart moving-average lookback periods for {ticker} ({asset_name}).
+
+Based ONLY on the real historical statistics below, pick:
+- A "fast" SMA (short-term trend, 15–100 days)
+- A "slow" SMA (medium/long-term trend, 80–300 days)
+
+The goal is chart legibility — which periods make THIS asset's own trend direction \
+and major reversals clearly visible on a daily candlestick chart? A highly volatile \
+asset with sharp swings may need longer SMAs so noise doesn't produce constant false \
+crosses; a smoother asset can use shorter periods for faster signal. The slow period \
+must be at least 40 days longer than the fast period.
+
+── {ticker} HISTORICAL STATISTICS ──
+{stats_summary}
+
+Respond with ONLY a JSON object, no explanation, no markdown:
+{{"sma_fast": <integer>, "sma_slow": <integer>}}
+"""
+
+
+def build_sma_period_prompt(ticker: str, asset_name: str, stats: AssetStats) -> str:
+    return SMA_PERIOD_PROMPT.format(
+        ticker=ticker, asset_name=asset_name,
+        stats_summary=format_asset_stats_summary(stats),
+    )
+
+
 def build_asset_profile_section(profile: str | None) -> str:
     """Pure formatter -- builds the ANALYSIS_PROMPT section text from a stored profile.
     Returns "" when there's no profile yet, so the section is omitted cleanly rather

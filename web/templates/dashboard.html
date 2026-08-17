@@ -394,11 +394,14 @@ function fmtTime(iso) {
   return d.toLocaleString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 }
 
-// Mini candlestick chart for the asset cards — real candles + SMA50/SMA200 overlays +
+// Mini candlestick chart for the asset cards — real candles + SMA overlays +
 // support/resistance price lines. Matches the popup chart's visual language at card
 // scale. No volume, no crosshair, no axis labels to stay clean and uncluttered.
 // Same disposal-before-recreate pattern as the detailed chart.
-function renderCardChart(containerId, points, technicals) {
+// fastPeriod/slowPeriod come from the same API response that drives the modal chart.
+function renderCardChart(containerId, points, technicals, fastPeriod, slowPeriod) {
+  fastPeriod = fastPeriod || 50;
+  slowPeriod = slowPeriod || 200;
   const el = document.getElementById(containerId);
   if (!el || typeof LightweightCharts === 'undefined') return;
   if (chartInstances[containerId]) {
@@ -429,18 +432,18 @@ function renderCardChart(containerId, points, technicals) {
     time: p.time, open: p.open, high: p.high, low: p.low, close: p.close,
   })));
 
-  // SMA50 (amber) + SMA200 (purple) — same colors as the popup chart
-  const sma50 = rollingSma(points, 50);
-  if (sma50.length) {
+  // Fast (amber) + slow (purple) SMA overlays — same colors as the popup chart
+  const cardSmaFast = rollingSma(points, fastPeriod);
+  if (cardSmaFast.length) {
     chart.addLineSeries({
       color: '#f59e0b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-    }).setData(sma50);
+    }).setData(cardSmaFast);
   }
-  const sma200 = rollingSma(points, 200);
-  if (sma200.length) {
+  const cardSmaSlow = rollingSma(points, slowPeriod);
+  if (cardSmaSlow.length) {
     chart.addLineSeries({
       color: '#8b5cf6', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-    }).setData(sma200);
+    }).setData(cardSmaSlow);
   }
 
   // Support / resistance thin dashed lines if the technicals carry them
@@ -466,11 +469,11 @@ function renderCardChart(containerId, points, technicals) {
 
 async function loadCardChart(ticker, containerId) {
   try {
-    // 1y matches the popup chart's own history window — needed for SMA200 (requires
+    // 1y matches the popup chart's own history window — needed for slow SMA (may need
     // 200+ data points) to render and for the chart to show meaningful trend context.
     const resp = await fetch(`/api/asset-history/${encodeURIComponent(ticker)}?period=1y`);
     const data = await resp.json();
-    renderCardChart(containerId, data.points || [], data.technicals || null);
+    renderCardChart(containerId, data.points || [], data.technicals || null, data.sma_fast, data.sma_slow);
   } catch (e) { console.error('loadCardChart:', ticker, e); }
 }
 
@@ -490,12 +493,15 @@ function rollingSma(points, period) {
   return out;
 }
 
-// The detailed per-asset modal chart: real candlesticks, volume, rolling SMA50/
-// SMA200 overlays, and price lines for every level that actually drives the buy
-// decision (entry/stop/take-profit/fair-value/support/resistance) -- everything
-// the tiny card sparkline deliberately strips out (no axes, no crosshair, no
-// labels) to stay a glance-only indicator.
-function renderDetailedAssetChart(containerId, legendId, points, technicals, refLines) {
+// The detailed per-asset modal chart: real candlesticks, volume, rolling SMA overlays,
+// and price lines for every level that actually drives the buy decision
+// (entry/stop/take-profit/fair-value/support/resistance) -- everything the tiny card
+// sparkline deliberately strips out (no axes, no crosshair, no labels) to stay a
+// glance-only indicator. fastPeriod/slowPeriod come from the API (per-asset AI-chosen
+// in auto mode, config values in manual mode, 50/200 in flat mode).
+function renderDetailedAssetChart(containerId, legendId, points, technicals, refLines, fastPeriod, slowPeriod) {
+  fastPeriod = fastPeriod || 50;
+  slowPeriod = slowPeriod || 200;
   const el = document.getElementById(containerId);
   const legendEl = document.getElementById(legendId);
   if (chartInstances[containerId]) {
@@ -537,15 +543,15 @@ function renderDetailedAssetChart(containerId, legendId, points, technicals, ref
   })));
 
   const legend = [];
-  const sma50 = rollingSma(points, 50);
-  if (sma50.length) {
-    chart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(sma50);
-    legend.push(['#f59e0b', 'SMA 50']);
+  const smaFastData = rollingSma(points, fastPeriod);
+  if (smaFastData.length) {
+    chart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(smaFastData);
+    legend.push(['#f59e0b', `SMA ${fastPeriod}`]);
   }
-  const sma200 = rollingSma(points, 200);
-  if (sma200.length) {
-    chart.addLineSeries({ color: '#8b5cf6', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(sma200);
-    legend.push(['#8b5cf6', 'SMA 200']);
+  const smaSlowData = rollingSma(points, slowPeriod);
+  if (smaSlowData.length) {
+    chart.addLineSeries({ color: '#8b5cf6', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(smaSlowData);
+    legend.push(['#8b5cf6', `SMA ${slowPeriod}`]);
   }
 
   // Magnitude-aware price formatter — same logic as engine.py's _fmt_price.
@@ -677,7 +683,7 @@ async function showAssetModal(ticker) {
     const data = await resp.json();
     if (_amCurrentTicker !== ticker) return; // modal closed/switched while this was in flight
     renderDetailedAssetChart('amChart', 'amLegend', data.points || [], data.technicals,
-      { entry, entryTime, stop, takeProfits, fairValue });
+      { entry, entryTime, stop, takeProfits, fairValue }, data.sma_fast, data.sma_slow);
   } catch (e) {
     console.error('showAssetModal chart fetch:', ticker, e);
   }

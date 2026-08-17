@@ -818,6 +818,9 @@ _SETTINGS_FIELDS: dict[str, type] = {
     "event_scan.price_dip_pct": float,
     "event_scan.price_surge_pct": float,
     "event_scan.claude_cooldown_minutes": int,
+    "research.sma_mode": str,
+    "research.sma_fast_period": int,
+    "research.sma_slow_period": int,
 }
 
 
@@ -915,8 +918,25 @@ async def asset_history(ticker: str, period: str = "1mo"):
         }
         for b in bars
     ]
+    # Determine which SMA periods to render for this asset.
+    # "auto":   use AI-chosen periods stored in the asset profile (if available)
+    # "manual": use the two period numbers from settings
+    # "flat":   always 50/200
+    research_cfg = state.config.get("research", {})
+    sma_mode = research_cfg.get("sma_mode", "auto")
+    sma_fast, sma_slow = 50, 200  # safe defaults
+    if sma_mode == "auto":
+        profile = state.research_engine.asset_profiles.get(ticker, {})
+        sma_fast = int(profile.get("sma_fast_period", 50))
+        sma_slow = int(profile.get("sma_slow_period", 200))
+    elif sma_mode == "manual":
+        sma_fast = int(research_cfg.get("sma_fast_period", 50))
+        sma_slow = int(research_cfg.get("sma_slow_period", 200))
+
     return {
         "points": points,
+        "sma_fast": sma_fast,
+        "sma_slow": sma_slow,
         "technicals": {
             "sma_50": technicals.sma_50,
             "sma_200": technicals.sma_200,
