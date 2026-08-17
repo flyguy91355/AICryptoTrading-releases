@@ -79,6 +79,12 @@ class DashboardState:
         self._event_last_prices: dict[str, float] = {}           # price from previous tick
         self._event_claude_cooldown: dict[str, datetime] = {}    # per-ticker cooldown
 
+        # Near-miss watchlist (2026-08-17): assets above watch_floor_conviction but
+        # below the buy gate -- re-scanned every watch_interval_minutes by watching_loop
+        # so a strengthening setup is caught quickly. In-memory only; repopulated by
+        # the next full scan after a restart.
+        self.watching_candidates: dict[str, dict] = {}
+
         # AI log persistence (2026-08-16, owner report: "the ai research engine is not
         # keeping the history") -- self.ai_log was purely in-memory, so it reset to
         # empty on every restart. This project got restarted several times in one
@@ -225,6 +231,7 @@ class DashboardState:
             "ai_log": self.ai_log[-100:],
             "paper_trading": self.config["trading"]["paper_trading"],
             "recent_sells": await self.portfolio.get_recent_sells(),
+            "watching": list(self.watching_candidates.keys()),
         }
 
     async def run_scan_cycle(self):
@@ -244,10 +251,36 @@ class DashboardState:
                 self.add_log("SCAN", "Batch scan unavailable/stalled — falling back to sequential", "WARNING")
                 await self._run_sequential_scan()
 
-            await self.broadcast({"type": "reports", "reports": self.latest_reports})
+            await self.broadcast({"type": "reports", "reports": self.latest_reports, "watching": list(self.watching_candidates.keys())})
             self.add_log("SCAN", "Scan cycle complete")
         finally:
             self._scan_in_progress = False
+
+    def _update_watchlist(self, ticker: str, report) -> None:
+        """Manages the near-miss watchlist: assets above watch_floor_conviction but
+        below the buy gate get added here and re-scanned more frequently by
+        watching_loop, so a strengthening setup is caught within minutes rather than
+        waiting for the next 3-hour full cycle."""
+        research_cfg = self.config.get("research", {})
+        watch_floor = research_cfg.get("watch_floor_conviction", 4.5)
+        min_conviction = research_cfg.get("min_conviction_score", 6.5)
+
+        if report.conviction_score >= watch_floor:
+            was_watching = ticker in self.watching_candidates
+            self.watching_candidates[ticker] = self.latest_reports[ticker]
+            if not was_watching and report.conviction_score < min_conviction:
+                self.add_log(
+                    ticker,
+                    f"Added to watchlist — conviction {report.conviction_score}/10 "
+                    f"(gate is {min_conviction}), monitoring for setup to strengthen",
+                )
+        elif ticker in self.watching_candidates:
+            del self.watching_candidates[ticker]
+            self.add_log(
+                ticker,
+                f"Removed from watchlist — conviction fell to {report.conviction_score}/10",
+                "WARNING",
+            )
 
     async def _act_on_report(self, ticker: str, name: str, report):
         """Shared post-analysis logic for both the batch and sequential scan paths --
@@ -270,6 +303,9 @@ class DashboardState:
         if ticker in self.portfolio.positions:
             return  # already held -- position management handles exits
 
+        # Maintain near-miss watchlist so watching_loop can re-scan close candidates
+        self._update_watchlist(ticker, report)
+
         signal = self.signal_generator._evaluate_report(report)
         if signal is None or not signal.should_execute:
             return
@@ -278,12 +314,36 @@ class DashboardState:
             self.add_log(ticker, "Signal qualifies but max_positions reached — skipped", "WARNING")
             return
 
+        # Confirmation pass: run a second independent Claude call before buying.
+        # Both must agree (BUY/STRONG BUY, conviction >= gate, R/R clears) to execute.
+        research_cfg = self.config.get("research", {})
+        if research_cfg.get("buy_confirm_required", True):
+            self.add_log(ticker, "BUY qualified — running confirmation analysis before executing")
+            try:
+                trade_history = await self.portfolio.get_trade_history_summary(ticker)
+                confirm_report = await self.research_engine.analyze_asset(ticker, name, trade_history)
+                confirm_signal = self.signal_generator._evaluate_report(confirm_report)
+                if confirm_signal is None or not confirm_signal.should_execute:
+                    self.add_log(
+                        ticker,
+                        f"BUY confirmation disagreed — conviction {confirm_report.conviction_score}/10 "
+                        f"({confirm_report.signal.value}) — skipped",
+                        "WARNING",
+                    )
+                    return
+                signal = confirm_signal
+                self.latest_reports[ticker] = self._serialize_report(confirm_report)
+            except Exception as e:
+                self.add_log(ticker, f"BUY confirmation error — skipped: {e}", "ERROR")
+                return
+
         ok = await self.order_manager.execute_buy(
             ticker, name, signal.entry_price, signal.stop_loss,
             signal.take_profit_targets, signal.position_size_dollars,
             signal.final_trail_pct,
         )
         if ok:
+            self.watching_candidates.pop(ticker, None)
             self.add_log(
                 ticker,
                 f"BUY executed — ${signal.position_size_dollars:.2f} "
@@ -469,6 +529,44 @@ class DashboardState:
                 logger.exception("asset_profile_refresh_loop: unhandled error")
             await asyncio.sleep(24 * 3600)
 
+    async def watching_loop(self):
+        """Re-scans near-miss candidates (above watch_floor_conviction, below the buy
+        gate) at a shorter cadence than the full universe scan. No Claude spend when
+        nothing is watching; skips tickers that get bought or drop off the list between
+        intervals. Waits one full interval before first firing so the initial full scan
+        populates the watchlist first."""
+        research_cfg = self.config.get("research", {})
+        interval = research_cfg.get("watch_interval_minutes", 45) * 60
+        await asyncio.sleep(interval)
+        while True:
+            try:
+                if self.watching_candidates and not self._scan_in_progress:
+                    tickers = list(self.watching_candidates)
+                    self.add_log("WATCH", f"Re-scanning {len(tickers)} near-miss candidate(s)")
+                    for ticker in tickers:
+                        if ticker not in self.watching_candidates:
+                            continue  # evicted by a concurrent full scan
+                        if ticker in self.portfolio.positions:
+                            self.watching_candidates.pop(ticker, None)
+                            continue
+                        asset = next((a for a in self.universe if a["ticker"] == ticker), None)
+                        if asset is None:
+                            self.watching_candidates.pop(ticker, None)
+                            continue
+                        try:
+                            trade_history = await self.portfolio.get_trade_history_summary(ticker)
+                            report = await self.research_engine.analyze_asset(
+                                ticker, asset["name"], trade_history
+                            )
+                            await self._act_on_report(ticker, asset["name"], report)
+                        except Exception:
+                            logger.exception("watching_loop: analysis failed for %s", ticker)
+                        await asyncio.sleep(1)
+                    await self.broadcast({"type": "reports", "reports": self.latest_reports, "watching": list(self.watching_candidates.keys())})
+            except Exception:
+                logger.exception("watching_loop: unhandled error")
+            await asyncio.sleep(interval)
+
     async def event_scan_loop(self):
         """Fast cheap loop: parallel quote fetches for all universe assets every few
         minutes, real Claude call only when a genuine trigger fires AND the per-ticker
@@ -539,6 +637,15 @@ class DashboardState:
             if not triggers:
                 continue
 
+            # Gate the real Claude call on minimum conviction floor. Assets with a
+            # prior score below this are structurally weak -- their RSI oversold events
+            # are typically the asset declining, not a genuine setup. Assets with no
+            # prior report (conviction=0) always get analyzed so new assets aren't skipped.
+            event_min = cfg.get("event_min_conviction", 4.0)
+            last_conviction = self.latest_reports.get(ticker, {}).get("conviction_score", 0)
+            if last_conviction > 0 and last_conviction < event_min:
+                continue
+
             trigger_desc = ", ".join(triggers)
             self.add_log(
                 ticker,
@@ -551,7 +658,7 @@ class DashboardState:
                 report = await self.research_engine.analyze_asset(ticker, name, trade_history)
                 await self._act_on_report(ticker, name, report)
                 # Broadcast the updated report so the dashboard card refreshes immediately
-                await self.broadcast({"type": "reports", "reports": self.latest_reports})
+                await self.broadcast({"type": "reports", "reports": self.latest_reports, "watching": list(self.watching_candidates.keys())})
             except Exception as e:
                 logger.exception("Event scan analysis failed for %s", ticker)
                 self.add_log(ticker, f"Event analysis error: {e}", "ERROR")
@@ -659,6 +766,7 @@ async def startup():
     asyncio.create_task(state.heartbeat_loop())
     asyncio.create_task(state.asset_profile_refresh_loop())
     asyncio.create_task(state.event_scan_loop())
+    asyncio.create_task(state.watching_loop())
 
 
 @app.get("/", response_class=HTMLResponse)

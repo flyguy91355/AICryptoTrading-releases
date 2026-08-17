@@ -158,6 +158,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
 .sig-buy { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
 .sig-sell { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-border); }
 .sig-hold, .sig-no-action { background: rgba(107,114,128,0.12); color: var(--text-muted); border: 1px solid var(--border); }
+.watch-badge { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; background: rgba(234,179,8,0.15); color: #d4a017; border: 1px solid rgba(234,179,8,0.3); vertical-align: middle; }
 
 .asset-stats-row { display: flex; gap: 10px; }
 .asset-stat { flex: 1; min-width: 0; }
@@ -359,6 +360,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
 let ws;
 let latestReports = {};
 let latestPositions = [];
+let watchingTickers = new Set();
 const seenLogKeys = new Set();
 const chartInstances = {}; // containerId -> LightweightCharts chart, so re-renders dispose cleanly
 
@@ -757,9 +759,10 @@ function updateUniverse(reports) {
     const rrColor = hasRr ? (rrQualifies ? 'var(--green)' : 'var(--text-primary)') : 'var(--text-muted)';
     const rrText = hasRr ? r.rr.toFixed(2) : '—';
     const rrNeed = (r.required_rr !== null && r.required_rr !== undefined) ? `need ≥${r.required_rr.toFixed(2)}` : '';
+    const watchBadge = watchingTickers.has(r.ticker) ? '<span class="watch-badge">WATCH</span>' : '';
     return `<div class="asset-card clickable" onclick="showAssetModal('${r.ticker}')">
       <div class="asset-card-header">
-        <div><div class="asset-ticker">${r.ticker}</div><div class="asset-name">${r.asset_name}</div></div>
+        <div><div class="asset-ticker">${r.ticker}${watchBadge}</div><div class="asset-name">${r.asset_name}</div></div>
         <span class="asset-sig ${sigClass(r.signal)}">${r.signal}${r.is_fallback ? ' ⚠' : ''}</span>
       </div>
       <div class="asset-stats-row">
@@ -832,6 +835,7 @@ async function manualSell(ticker) {
 
 function handleMessage(msg) {
   if (msg.type === 'init') {
+    watchingTickers = new Set(msg.watching || []);
     updatePortfolio(msg.portfolio);
     updateUniverse(msg.reports || {});
     updateRecentSells(msg.recent_sells || []);
@@ -843,6 +847,7 @@ function handleMessage(msg) {
     updatePortfolio(msg.portfolio);
     refreshRecentSells();
   } else if (msg.type === 'reports') {
+    if (msg.watching) watchingTickers = new Set(msg.watching);
     updateUniverse(msg.reports || {});
   } else if (msg.type === 'ai_log') {
     appendAiLog(msg.entry);
