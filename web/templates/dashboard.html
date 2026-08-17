@@ -512,7 +512,7 @@ function renderDetailedAssetChart(containerId, legendId, points, technicals, ref
     layout: { background: { color: 'transparent' }, textColor: isDark ? '#9ca3af' : '#4b5563' },
     grid: { vertLines: { color: isDark ? '#1f2937' : '#e5e7eb' }, horzLines: { color: isDark ? '#1f2937' : '#e5e7eb' } },
     rightPriceScale: { borderColor: isDark ? '#2a3a4e' : '#d8dee6' },
-    timeScale: { borderColor: isDark ? '#2a3a4e' : '#d8dee6', timeVisible: false },
+    timeScale: { borderColor: isDark ? '#2a3a4e' : '#d8dee6', timeVisible: false, rightOffset: 8 },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   });
 
@@ -557,12 +557,9 @@ function renderDetailedAssetChart(containerId, legendId, points, technicals, ref
 
   const priceLine = (price, color, title, lineStyle) => {
     if (price === null || price === undefined || price <= 0) return;
-    // axisLabelVisible: false on every price line — the legend above the chart already
-    // shows all labels/prices; keeping axis labels on was stacking 7+ labels on the right
-    // axis and crowding the auto-shown current-price label off screen.
     candleSeries.createPriceLine({
       price, color, lineWidth: 1, lineStyle: lineStyle ?? LightweightCharts.LineStyle.Dashed,
-      axisLabelVisible: false, title,
+      axisLabelVisible: true, title,
     });
     legend.push([color, `${title} $${fmtP(price)}`]);
   };
