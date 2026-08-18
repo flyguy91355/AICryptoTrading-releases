@@ -79,6 +79,21 @@ class DashboardState:
         self._event_last_prices: dict[str, float] = {}           # price from previous tick
         self._event_claude_cooldown: dict[str, datetime] = {}    # per-ticker cooldown
 
+        # Per-ticker lock around _act_on_report's qualify/confirm/buy decision
+        # (2026-08-18, cost audit) -- four independent producers (the batch scan, the
+        # sequential fallback scan, watching_loop, and the event-scan trigger) can each
+        # call _act_on_report for the same ticker with no coordination between them.
+        # Without this, two of those loops processing the same ticker around the same
+        # time could each pass the "not already held" check, each fire a real, billed
+        # buy-confirmation Claude call for the same ticker, and -- worse than the wasted
+        # spend alone -- each proceed to execute_buy, risking a double buy. The lock
+        # makes the qualify/confirm/buy sequence mutually exclusive per ticker; a
+        # concurrent call blocks until the first finishes, then re-checks
+        # self.portfolio.positions (now updated if the first call bought) before doing
+        # anything itself. In-memory only, same not-worth-persisting precedent as the
+        # cooldown dicts above -- a lock has no meaning to persist across a restart.
+        self._act_on_report_locks: dict[str, asyncio.Lock] = {}
+
         # Near-miss watchlist (2026-08-17): assets above watch_floor_conviction but
         # below the buy gate -- re-scanned every watch_interval_minutes by watching_loop
         # so a strengthening setup is caught quickly. In-memory only; repopulated by
@@ -310,48 +325,60 @@ class DashboardState:
         if signal is None or not signal.should_execute:
             return
 
-        if len(self.portfolio.positions) >= self.config.get("portfolio", {}).get("max_positions", 8):
-            self.add_log(ticker, "Signal qualifies but max_positions reached — skipped", "WARNING")
-            return
-
-        # Confirmation pass: run a second independent Claude call before buying.
-        # Both must agree (BUY/STRONG BUY, conviction >= gate, R/R clears) to execute.
-        research_cfg = self.config.get("research", {})
-        if research_cfg.get("buy_confirm_required", True):
-            self.add_log(ticker, "BUY qualified — running confirmation analysis before executing")
-            try:
-                trade_history = await self.portfolio.get_trade_history_summary(ticker)
-                confirm_report = await self.research_engine.analyze_asset(ticker, name, trade_history)
-                confirm_signal = self.signal_generator._evaluate_report(confirm_report)
-                if confirm_signal is None or not confirm_signal.should_execute:
-                    self.add_log(
-                        ticker,
-                        f"BUY confirmation disagreed — conviction {confirm_report.conviction_score}/10 "
-                        f"({confirm_report.signal.value}) — skipped",
-                        "WARNING",
-                    )
-                    return
-                signal = confirm_signal
-                self.latest_reports[ticker] = self._serialize_report(confirm_report)
-            except Exception as e:
-                self.add_log(ticker, f"BUY confirmation error — skipped: {e}", "ERROR")
+        # Per-ticker lock (2026-08-18, cost audit) -- see its own comment in __init__.
+        # Everything from here on (the real qualify/confirm/buy decision) is mutually
+        # exclusive per ticker, closing the gap where two independent scan loops could
+        # otherwise both fire a real confirmation call, or both buy, for the same
+        # ticker around the same time.
+        lock = self._act_on_report_locks.setdefault(ticker, asyncio.Lock())
+        async with lock:
+            # Re-check under the lock -- a concurrent call for this same ticker may
+            # have already bought it while this call was waiting to acquire the lock.
+            if ticker in self.portfolio.positions:
                 return
 
-        ok = await self.order_manager.execute_buy(
-            ticker, name, signal.entry_price, signal.stop_loss,
-            signal.take_profit_targets, signal.position_size_dollars,
-            signal.final_trail_pct,
-        )
-        if ok:
-            self.watching_candidates.pop(ticker, None)
-            self.add_log(
-                ticker,
-                f"BUY executed — ${signal.position_size_dollars:.2f} "
-                f"(conviction {signal.conviction}/10)",
+            if len(self.portfolio.positions) >= self.config.get("portfolio", {}).get("max_positions", 8):
+                self.add_log(ticker, "Signal qualifies but max_positions reached — skipped", "WARNING")
+                return
+
+            # Confirmation pass: run a second independent Claude call before buying.
+            # Both must agree (BUY/STRONG BUY, conviction >= gate, R/R clears) to execute.
+            research_cfg = self.config.get("research", {})
+            if research_cfg.get("buy_confirm_required", True):
+                self.add_log(ticker, "BUY qualified — running confirmation analysis before executing")
+                try:
+                    trade_history = await self.portfolio.get_trade_history_summary(ticker)
+                    confirm_report = await self.research_engine.analyze_asset(ticker, name, trade_history)
+                    confirm_signal = self.signal_generator._evaluate_report(confirm_report)
+                    if confirm_signal is None or not confirm_signal.should_execute:
+                        self.add_log(
+                            ticker,
+                            f"BUY confirmation disagreed — conviction {confirm_report.conviction_score}/10 "
+                            f"({confirm_report.signal.value}) — skipped",
+                            "WARNING",
+                        )
+                        return
+                    signal = confirm_signal
+                    self.latest_reports[ticker] = self._serialize_report(confirm_report)
+                except Exception as e:
+                    self.add_log(ticker, f"BUY confirmation error — skipped: {e}", "ERROR")
+                    return
+
+            ok = await self.order_manager.execute_buy(
+                ticker, name, signal.entry_price, signal.stop_loss,
+                signal.take_profit_targets, signal.position_size_dollars,
+                signal.final_trail_pct,
             )
-            await self.broadcast({"type": "portfolio", "portfolio": self.get_portfolio_snapshot()})
-        else:
-            self.add_log(ticker, "BUY signal qualified but order execution failed", "ERROR")
+            if ok:
+                self.watching_candidates.pop(ticker, None)
+                self.add_log(
+                    ticker,
+                    f"BUY executed — ${signal.position_size_dollars:.2f} "
+                    f"(conviction {signal.conviction}/10)",
+                )
+                await self.broadcast({"type": "portfolio", "portfolio": self.get_portfolio_snapshot()})
+            else:
+                self.add_log(ticker, "BUY signal qualified but order execution failed", "ERROR")
 
     async def _run_sequential_scan(self):
         """Original per-ticker path -- safety net for when the batch API is
