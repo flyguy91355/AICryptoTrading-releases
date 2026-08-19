@@ -86,6 +86,23 @@ def _watch_recheck_due(
     return minutes_since_last >= interval
 
 
+def _apply_live_quotes_to_reports(reports: dict, quotes: dict) -> None:
+    """Mutates each report's current_price in place from a ticker->price map (2026-08-19,
+    owner request) -- gives the universe/candidate cards a live price alongside their
+    AI-recommended entry_price, which is otherwise a static snapshot from whenever that
+    report was generated (potentially hours stale), unlike the Positions cards, which
+    already refresh current_price every ~20s. Reuses the quotes _run_event_scan already
+    fetches every cycle (concurrently, via asyncio.gather) for its own trigger-checking,
+    rather than adding a second dedicated fetch loop -- no new network calls, no risk to
+    position_update_cycle's own timing. Leaves a report's current_price untouched (never
+    reset to None) for any ticker whose quote wasn't fetched this cycle -- a transient
+    failure, or a ticker genuinely outside the universe -- so a value already shown on
+    the dashboard doesn't flicker away."""
+    for ticker, price in quotes.items():
+        if ticker in reports:
+            reports[ticker]["current_price"] = price
+
+
 class DashboardState:
     def __init__(self):
         self.config = load_config()
@@ -558,6 +575,7 @@ class DashboardState:
             "is_fallback": report.is_fallback,
             "rr": rr,
             "required_rr": required_rr,
+            "current_price": None,  # filled in by _apply_live_quotes_to_reports
         }
 
     async def position_update_cycle(self):
@@ -724,11 +742,17 @@ class DashboardState:
             return_exceptions=True,
         )
 
+        # Collected regardless of the per-ticker skip branches below (held position,
+        # cooldown, no trigger) -- feeds the universe cards' live "Current" price via
+        # _apply_live_quotes_to_reports, reusing this fetch rather than a second one.
+        live_quotes: dict[str, float] = {}
+
         for (ticker, name), result in zip(tickers, raw):
             if isinstance(result, Exception):
                 continue
 
             price = result.price
+            live_quotes[ticker] = price
 
             # Maintain rolling buffer (max 30 prices) for RSI -- pure in-process math
             buf = self._event_price_buffers.setdefault(ticker, [])
@@ -786,6 +810,13 @@ class DashboardState:
             # Cooldown applies regardless of analysis outcome -- prevents re-firing
             # on an unchanged condition between full scan cycles
             self._event_claude_cooldown[ticker] = now + timedelta(minutes=cooldown_mins)
+
+        # Refresh the universe cards' live "Current" price every tick (2026-08-19,
+        # owner request) -- no extra Claude spend, no extra network calls, just applying
+        # the quotes already fetched above. Broadcasts even when no event trigger fired
+        # this cycle (the common case), since that's the only path that ever updates it.
+        _apply_live_quotes_to_reports(self.latest_reports, live_quotes)
+        await self.broadcast({"type": "reports", "reports": self.latest_reports, "watching": list(self.watching_candidates.keys())})
 
 
 state = DashboardState()

@@ -765,6 +765,9 @@ function updateUniverse(reports) {
     const rrColor = hasRr ? (rrQualifies ? 'var(--green)' : 'var(--text-primary)') : 'var(--text-muted)';
     const rrText = hasRr ? r.rr.toFixed(2) : '—';
     const rrNeed = (r.required_rr !== null && r.required_rr !== undefined) ? `need ≥${r.required_rr.toFixed(2)}` : '';
+    const hasCurrent = r.current_price !== null && r.current_price !== undefined;
+    const curText = hasCurrent ? fmtUsd(r.current_price) : '—';
+    const curColor = hasCurrent ? (r.current_price >= r.entry_price ? 'var(--green)' : 'var(--red)') : 'var(--text-muted)';
     const watchBadge = watchingTickers.has(r.ticker) ? '<span class="watch-badge">WATCH</span>' : '';
     return `<div class="asset-card clickable" onclick="showAssetModal('${r.ticker}')">
       <div class="asset-card-header">
@@ -774,6 +777,9 @@ function updateUniverse(reports) {
       <div class="asset-stats-row">
         <div class="asset-stat"><div class="asset-stat-label">Conviction</div><div class="asset-stat-value">${r.conviction_score.toFixed(1)}/10</div></div>
         <div class="asset-stat"><div class="asset-stat-label">Entry</div><div class="asset-stat-value">${fmtUsd(r.entry_price)}</div></div>
+        <div class="asset-stat"><div class="asset-stat-label">Current</div><div class="asset-stat-value" style="color:${curColor}">${curText}</div></div>
+      </div>
+      <div class="asset-stats-row">
         <div class="asset-stat"><div class="asset-stat-label">Fair Value</div><div class="asset-stat-value">${fmtUsd(r.fair_value_estimate)}</div></div>
         <div class="asset-stat">
           <div class="asset-stat-label">R/R</div>
