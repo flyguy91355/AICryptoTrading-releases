@@ -128,6 +128,22 @@ class OrderManager:
         # sat at its original price for days. Confirmed live: LINK/USD's stop from
         # 2026-08-15 was orphaned by a restart 18 seconds later and stayed un-ratcheted
         # for 4+ days while every sync_exit_orders tick since failed the same way.
+        #
+        # Verified against Alpaca's real docs and the live account before shipping this
+        # (per this project's standing rule to confirm Alpaca behavior, never guess):
+        # qty_available is documented as qty minus what's reserved by open orders, which
+        # matches the observed "insufficient balance" symptom exactly; crypto stop_limit
+        # orders ARE replaceable via PATCH (only notional orders are replace-blocked, and
+        # this project's stops are always qty-based); and get_open_orders()'s existing
+        # _to_canonical(o.symbol) call was confirmed correct against the real account --
+        # Alpaca's orders endpoints return crypto symbols WITH the slash ("LINK/USD"),
+        # unlike the positions endpoint (which returns "LINKUSD"), so the symbol survives
+        # unchanged through _to_canonical's no-slash-keyed lookup table via its fallback
+        # path rather than an actual table hit. One real, still-open limit: get_open_orders
+        # calls list_orders(status="open") with no explicit `limit`, so it defaults to
+        # Alpaca's own page size of 50 -- fine at this project's current single-digit
+        # position count, but would need an explicit higher limit if the held-position
+        # count ever approaches that.
         try:
             open_orders = await self.broker.get_open_orders()
         except Exception as e:
