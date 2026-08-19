@@ -116,6 +116,38 @@ class OrderManager:
                     "_sync_portfolio: %s exists at Alpaca but not locally — "
                     "needs manual review, not auto-adopted", ticker)
 
+        # Rebuild _stop_order_ids from Alpaca's real open orders (fixed 2026-08-19,
+        # LINK/USD incident) -- this dict is in-memory only and, before this fix, was
+        # NEVER restored from a real broker query at startup, only the docstring above
+        # claimed it was. A restart therefore permanently orphaned the tracking for any
+        # position whose stop was placed in a now-dead process: sync_exit_orders saw no
+        # existing_id, skipped the cancel-or-replace path entirely, and tried to place a
+        # brand-new full-size stop against shares Alpaca had already fully reserved for
+        # the still-live, now-forgotten original order -- rejected every single cycle
+        # with "insufficient balance", while that real (but never ratcheted) stop just
+        # sat at its original price for days. Confirmed live: LINK/USD's stop from
+        # 2026-08-15 was orphaned by a restart 18 seconds later and stayed un-ratcheted
+        # for 4+ days while every sync_exit_orders tick since failed the same way.
+        try:
+            open_orders = await self.broker.get_open_orders()
+        except Exception as e:
+            logger.warning("_sync_portfolio: failed to fetch open orders: %s", e)
+            return
+
+        for o in open_orders:
+            ticker = o["ticker"]
+            if ticker not in self.portfolio.positions:
+                continue
+            if o["side"] != "sell" or o["type"] not in ("stop_limit", "stop"):
+                continue
+            if ticker in self._stop_order_ids:
+                logger.warning(
+                    "_sync_portfolio: multiple resting stop orders found for %s at "
+                    "Alpaca (%s and %s) -- tracking the most recently seen one; the "
+                    "other needs manual review", ticker, self._stop_order_ids[ticker],
+                    o["order_id"])
+            self._stop_order_ids[ticker] = o["order_id"]
+
     async def _await_terminal_fill(self, order: Order) -> Order:
         """A synchronous submit_order response can still be non-terminal (PENDING,
         or any of Alpaca's other in-flight statuses) even though the order settles a
@@ -251,9 +283,17 @@ class OrderManager:
                 new_stop = round(pos.current_price * (1 - trail_pct / 100), 6)
                 if pos.trailing_stop is not None and new_stop <= pos.trailing_stop:
                     continue  # one-way ratchet -- never loosen
-                pos.trailing_stop = new_stop
-                await self.portfolio._save_position(pos)
 
+                # pos.trailing_stop is only updated (and persisted) once the broker
+                # action actually succeeds -- fixed 2026-08-19, LINK/USD incident.
+                # Previously this was set and saved BEFORE attempting the replace/place
+                # below, so a failed placement (e.g. "insufficient balance") still left
+                # the local record looking like the ratchet had happened. That silently
+                # broke the one-way-ratchet check above for every later tick too: a
+                # freshly computed new_stop would get compared against the already-
+                # inflated (but never actually applied) trailing_stop, found not higher,
+                # and skipped -- permanently masking the fact that the REAL resting
+                # order was still stuck at a stale price.
                 limit_price = new_stop * (1 - _STOP_LIMIT_BUFFER_PCT)
                 existing_id = self._stop_order_ids.get(ticker)
                 replaced = None
@@ -262,6 +302,8 @@ class OrderManager:
                         existing_id, stop_price=new_stop, limit_price=limit_price)
                 if replaced:
                     self._stop_order_ids[ticker] = replaced
+                    pos.trailing_stop = new_stop
+                    await self.portfolio._save_position(pos)
                     continue
 
                 # Replace failed or nothing tracked -- fall back to cancel+place
@@ -271,6 +313,8 @@ class OrderManager:
                 new_id = await self._place_stop_order(ticker, pos.shares, new_stop)
                 if new_id:
                     self._stop_order_ids[ticker] = new_id
+                    pos.trailing_stop = new_stop
+                    await self.portfolio._save_position(pos)
                 else:
                     logger.error("sync_exit_orders: failed to (re)place stop for %s", ticker)
 
