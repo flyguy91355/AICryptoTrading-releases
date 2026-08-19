@@ -49,6 +49,43 @@ _DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 _SESSION_SECRET_KEY = os.environ.get("SESSION_SECRET_KEY", "dev-only-insecure-key")
 
 
+def _watch_conviction_changed_meaningfully(
+    old_conviction: float | None, new_conviction: float, epsilon: float,
+) -> bool:
+    """Whether a fresh watchlist conviction score differs enough from the last recorded
+    one to reset watching_loop's stale-backoff streak (2026-08-19, cost audit follow-up
+    -- see _watch_recheck_due's docstring for the full incident). Unlike a dip low or
+    an R/R ratio, conviction has no natural "only matters getting deeper" direction --
+    a real rise toward the buy gate and a real fall out of contention are equally worth
+    noticing -- so this is a plain symmetric |delta| >= epsilon check, not a one-sided
+    comparison. A missing old_conviction (first time this ticker was ever checked)
+    always counts as meaningfully different."""
+    if old_conviction is None:
+        return True
+    return abs(new_conviction - old_conviction) >= epsilon
+
+
+def _watch_recheck_due(
+    streak: int, base_interval_min: float, backoff_multiplier: float,
+    max_interval_min: float, minutes_since_last: float,
+) -> bool:
+    """Whether enough time has passed to spend another real watchlist re-check on this
+    ticker (2026-08-19, owner-requested cost audit follow-up) -- live-caught: BTC/USD
+    sat on the watchlist getting re-analyzed every 45 minutes for hours, landing on the
+    identical conviction score (5.2/10) four checks in a row. Conviction is entirely
+    Claude-derived, unlike AITrading's dip-low/R/R checks, which have a free, non-Claude
+    price computation available to decide whether a call is even worth making -- there's
+    no equivalent cheap proxy here, so instead of skipping outright, each consecutive
+    unchanged result (tracked as `streak`, reset to 0 by
+    _watch_conviction_changed_meaningfully) doubles the required gap before the next
+    real check, same principle as this codebase's own exit-order retry backoff.
+    Clamped to max_interval_min -- by design, the owner-set default matches the full
+    scan's own interval, since beyond that point the scheduled scan re-touches this
+    ticker anyway and further backoff would just be redundant with it."""
+    interval = min(base_interval_min * (backoff_multiplier ** streak), max_interval_min)
+    return minutes_since_last >= interval
+
+
 class DashboardState:
     def __init__(self):
         self.config = load_config()
@@ -99,6 +136,20 @@ class DashboardState:
         # so a strengthening setup is caught quickly. In-memory only; repopulated by
         # the next full scan after a restart.
         self.watching_candidates: dict[str, dict] = {}
+
+        # Watchlist staleness backoff (2026-08-19, owner-requested cost audit
+        # follow-up) -- live-caught: BTC/USD sat on the watchlist getting re-analyzed
+        # every 45 minutes for hours, landing on the identical conviction (5.2/10) four
+        # checks in a row. Conviction is Claude-derived with no cheap non-Claude proxy
+        # (unlike AITrading's dip-low/R/R checks), so watching_loop can't decide to skip
+        # a ticker without first paying for the check -- instead, each consecutive
+        # unchanged result stretches the NEXT required gap further (see
+        # _watch_recheck_due). In-memory only, same not-worth-persisting precedent as
+        # every other cooldown/lock dict in this file -- losing a backoff streak on
+        # restart just means one ticker's next check reverts to the base interval.
+        self._watch_last_check: dict[str, datetime] = {}
+        self._watch_stale_streak: dict[str, int] = {}
+        self._watch_last_conviction: dict[str, float] = {}
 
         # AI log persistence (2026-08-16, owner report: "the ai research engine is not
         # keeping the history") -- self.ai_log was purely in-memory, so it reset to
@@ -291,6 +342,12 @@ class DashboardState:
                 )
         elif ticker in self.watching_candidates:
             del self.watching_candidates[ticker]
+            # Clear staleness-backoff state too (2026-08-19) -- a ticker that later
+            # re-qualifies for the watchlist should start fresh at the base interval,
+            # not inherit a long-stretched backoff from a previous, unrelated stint.
+            self._watch_last_check.pop(ticker, None)
+            self._watch_stale_streak.pop(ticker, None)
+            self._watch_last_conviction.pop(ticker, None)
             self.add_log(
                 ticker,
                 f"Removed from watchlist — conviction fell to {report.conviction_score}/10",
@@ -569,8 +626,35 @@ class DashboardState:
             try:
                 if self.watching_candidates and not self._scan_in_progress:
                     tickers = list(self.watching_candidates)
-                    self.add_log("WATCH", f"Re-scanning {len(tickers)} near-miss candidate(s)")
-                    for ticker in tickers:
+                    stale_cfg = self.config.get("research", {})
+                    backoff_mult = stale_cfg.get("watch_stale_backoff_multiplier", 2.0)
+                    backoff_max = stale_cfg.get("watch_stale_backoff_max_minutes", 180)
+                    conviction_epsilon = stale_cfg.get("watch_stale_conviction_epsilon", 0.5)
+                    base_interval_min = interval / 60
+                    now = datetime.now()
+
+                    # Staleness backoff (2026-08-19, cost audit follow-up) -- filters
+                    # to only the tickers actually due this cycle BEFORE logging/
+                    # spending anything, so a ticker whose conviction has repeatedly
+                    # come back unchanged (real live pattern: BTC/USD stuck at 5.2/10
+                    # for 4 consecutive checks) gets checked less often over time
+                    # instead of every single interval forever. See _watch_recheck_due.
+                    due_tickers = [
+                        t for t in tickers
+                        if _watch_recheck_due(
+                            streak=self._watch_stale_streak.get(t, 0),
+                            base_interval_min=base_interval_min,
+                            backoff_multiplier=backoff_mult,
+                            max_interval_min=backoff_max,
+                            minutes_since_last=(
+                                (now - self._watch_last_check[t]).total_seconds() / 60
+                                if t in self._watch_last_check else base_interval_min
+                            ),
+                        )
+                    ]
+                    if due_tickers:
+                        self.add_log("WATCH", f"Re-scanning {len(due_tickers)} near-miss candidate(s)")
+                    for ticker in due_tickers:
                         if ticker not in self.watching_candidates:
                             continue  # evicted by a concurrent full scan
                         if ticker in self.portfolio.positions:
@@ -585,11 +669,20 @@ class DashboardState:
                             report = await self.research_engine.analyze_asset(
                                 ticker, asset["name"], trade_history
                             )
+                            self._watch_last_check[ticker] = now
+                            if _watch_conviction_changed_meaningfully(
+                                    self._watch_last_conviction.get(ticker),
+                                    report.conviction_score, conviction_epsilon):
+                                self._watch_stale_streak[ticker] = 0
+                            else:
+                                self._watch_stale_streak[ticker] = self._watch_stale_streak.get(ticker, 0) + 1
+                            self._watch_last_conviction[ticker] = report.conviction_score
                             await self._act_on_report(ticker, asset["name"], report)
                         except Exception:
                             logger.exception("watching_loop: analysis failed for %s", ticker)
                         await asyncio.sleep(1)
-                    await self.broadcast({"type": "reports", "reports": self.latest_reports, "watching": list(self.watching_candidates.keys())})
+                    if due_tickers:
+                        await self.broadcast({"type": "reports", "reports": self.latest_reports, "watching": list(self.watching_candidates.keys())})
             except Exception:
                 logger.exception("watching_loop: unhandled error")
             await asyncio.sleep(interval)
