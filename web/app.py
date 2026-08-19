@@ -299,6 +299,8 @@ class DashboardState:
                     "trailing_stop": pos.trailing_stop,
                     "final_trail_pct": pos.final_trail_pct,
                     "take_profit_targets": pos.take_profit_targets,
+                    "t1_target_price": pos.t1_target_price,
+                    "t2_target_price": pos.t2_target_price,
                     "opened_at": pos.opened_at.isoformat(),
                 }
                 for pos in p.positions.values()

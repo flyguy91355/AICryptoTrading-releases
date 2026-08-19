@@ -717,9 +717,47 @@ function updatePortfolio(p) {
   container.innerHTML = p.positions.map(pos => {
     const chartId = 'posChart-' + pos.ticker.replace('/', '');
     const pnlColor = pos.lifetime_pnl >= 0 ? 'var(--green)' : 'var(--red)';
-    const stop = pos.trailing_stop !== null && pos.trailing_stop !== undefined ? pos.trailing_stop : pos.stop_loss;
-    const trailNote = (pos.trailing_stop !== null && pos.trailing_stop !== undefined && pos.final_trail_pct)
-      ? ` <span style="color:var(--text-muted);font-weight:500;">(AI trail→${pos.final_trail_pct.toFixed(1)}%)</span>` : '';
+
+    // Trailing stop is only "armed" (actively ratcheting) once trailing_stop is set --
+    // before that the position rides the plain, static stop_loss (2026-08-19, owner
+    // report: this distinction existed in the data but wasn't clearly shown on the
+    // card -- the old trailNote only appeared when final_trail_pct happened to be set,
+    // which isn't the real "is this trailing" signal). Percent shown is a live,
+    // computed cushion, not a stored field: distance from current price down to the
+    // trailing stop when armed (mirrors AITrading's own card convention), or distance
+    // from entry down to the static stop when not yet armed.
+    const isTrailing = pos.trailing_stop !== null && pos.trailing_stop !== undefined;
+    const stop = isTrailing ? pos.trailing_stop : pos.stop_loss;
+    const stopLabel = isTrailing ? 'Trailing Stop' : 'Stop';
+    const stopPct = isTrailing
+      ? (pos.current_price ? (pos.current_price - stop) / pos.current_price * 100 : null)
+      : (pos.entry_price ? (stop - pos.entry_price) / pos.entry_price * 100 : null);
+    const stopPctText = stopPct !== null
+      ? ` <span style="color:var(--text-muted);font-weight:500;">(${stopPct.toFixed(1)}%)</span>` : '';
+
+    // Take-profit tier status: t1_target_price/t2_target_price are the ORIGINAL target
+    // prices captured once at buy time (preserved even after take_profit_targets itself
+    // shrinks as each tranche fires) -- a reference price no longer present in the live
+    // array means that tranche already fired. A position bought before this reference
+    // data existed (or with no take-profit targets configured at all) shows "—".
+    const targets = Array.isArray(pos.take_profit_targets) ? pos.take_profit_targets : [];
+    const hasT1Ref = pos.t1_target_price !== null && pos.t1_target_price !== undefined;
+    const hasT2Ref = pos.t2_target_price !== null && pos.t2_target_price !== undefined;
+    const t1Fired = hasT1Ref && !targets.some(t => Math.abs(t - pos.t1_target_price) < 1e-6);
+    const t2Fired = hasT2Ref && !targets.some(t => Math.abs(t - pos.t2_target_price) < 1e-6);
+    let tpValue;
+    if (hasT1Ref || hasT2Ref) {
+      const parts = [];
+      if (hasT1Ref) parts.push(`<span style="color:${t1Fired ? 'var(--green)' : 'var(--text-muted)'}">T1${t1Fired ? '✓' : ''}</span>`);
+      if (hasT2Ref) parts.push(`<span style="color:${t2Fired ? 'var(--green)' : 'var(--text-muted)'}">T2${t2Fired ? '✓' : ''}</span>`);
+      if (targets.length > 0) parts.push(`<span style="color:var(--text-muted)">${targets.length} left</span>`);
+      tpValue = parts.join(' ');
+    } else if (targets.length > 0) {
+      tpValue = `${targets.length} target${targets.length > 1 ? 's' : ''}`;
+    } else {
+      tpValue = '—';
+    }
+
     return `<div class="asset-card clickable" data-pos-ticker="${pos.ticker}">
       <div class="asset-card-header">
         <div><div class="asset-ticker">${pos.ticker}</div><div class="asset-name">${pos.shares.toFixed(6)} units</div></div>
@@ -732,7 +770,8 @@ function updatePortfolio(p) {
       </div>
       <div class="asset-chart-box" id="${chartId}"></div>
       <div class="asset-stats-row">
-        <div class="asset-stat"><div class="asset-stat-label">Stop</div><div class="asset-stat-value" style="font-size:12.5px;">${fmtUsd(stop)}${trailNote}</div></div>
+        <div class="asset-stat"><div class="asset-stat-label">${stopLabel}</div><div class="asset-stat-value" style="font-size:12.5px;">${fmtUsd(stop)}${stopPctText}</div></div>
+        <div class="asset-stat"><div class="asset-stat-label">Take-Profit</div><div class="asset-stat-value" style="font-size:12.5px;">${tpValue}</div></div>
         <div class="asset-stat"><div class="asset-stat-label">Market Value</div><div class="asset-stat-value" style="font-size:12.5px;">${fmtUsd(pos.market_value)}</div></div>
       </div>
     </div>`;
