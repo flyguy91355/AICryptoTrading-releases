@@ -726,6 +726,36 @@ class DashboardState:
                 logger.exception("event_scan_loop: unhandled error")
             await asyncio.sleep(interval)
 
+    async def _fetch_universe_quotes(self):
+        """Concurrent quote fetch for the whole universe -- shared by _run_event_scan's
+        own per-cycle pass and _initial_universe_price_fill's one-off startup fill, so
+        there's exactly one fetch implementation. Returns (tickers, raw) where raw is
+        positionally aligned with tickers and each entry is either a Quote or an
+        Exception (asyncio.gather(return_exceptions=True))."""
+        tickers = [(a["ticker"], a["name"]) for a in self.universe]
+        raw = await asyncio.gather(
+            *[self.market_data.get_quote(t) for t, _ in tickers],
+            return_exceptions=True,
+        )
+        return tickers, raw
+
+    async def _initial_universe_price_fill(self):
+        """Immediate one-off quote fetch right after startup (2026-08-19, owner report
+        right after the 'Current' price feature shipped) -- event_scan_loop deliberately
+        waits a full event_scan.interval_minutes before its own first tick (so the
+        startup batch scan gets priority), which left every universe card showing the
+        null-price '—' fallback for minutes after any restart. No trigger-checking, no
+        Claude spend -- just the same shared fetch _run_event_scan uses, applied and
+        broadcast once. Any failure here is non-fatal (the regular event_scan_loop tick
+        still fills this in a few minutes later either way)."""
+        try:
+            tickers, raw = await self._fetch_universe_quotes()
+            quotes = {t: r.price for (t, _), r in zip(tickers, raw) if not isinstance(r, Exception)}
+            _apply_live_quotes_to_reports(self.latest_reports, quotes)
+            await self.broadcast({"type": "reports", "reports": self.latest_reports, "watching": list(self.watching_candidates.keys())})
+        except Exception:
+            logger.exception("_initial_universe_price_fill: failed")
+
     async def _run_event_scan(self):
         """One event-scan tick: fetch quotes in parallel, update rolling price buffers,
         check triggers for unowned assets, and fire a single-ticker Claude call if a
@@ -734,13 +764,8 @@ class DashboardState:
         cooldown_mins = cfg.get("claude_cooldown_minutes", 60)
         now = datetime.now()
 
-        tickers = [(a["ticker"], a["name"]) for a in self.universe]
-
         # Parallel quote fetch -- the only I/O in the normal (no-trigger) fast path
-        raw = await asyncio.gather(
-            *[self.market_data.get_quote(t) for t, _ in tickers],
-            return_exceptions=True,
-        )
+        tickers, raw = await self._fetch_universe_quotes()
 
         # Collected regardless of the per-ticker skip branches below (held position,
         # cooldown, no trigger) -- feeds the universe cards' live "Current" price via
@@ -918,6 +943,7 @@ async def startup():
     asyncio.create_task(state.asset_profile_refresh_loop())
     asyncio.create_task(state.event_scan_loop())
     asyncio.create_task(state.watching_loop())
+    asyncio.create_task(state._initial_universe_price_fill())
 
 
 @app.get("/", response_class=HTMLResponse)
