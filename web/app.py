@@ -1185,6 +1185,21 @@ async def manual_sell(ticker: str):
     return {"status": "ok" if ok else "failed"}
 
 
+def _resolve_auto_sma_periods(profile: dict) -> tuple[int, int]:
+    """Pure: the AI-chosen SMA fast/slow periods for one asset's profile, in "auto"
+    sma_mode -- falls back to 50/200 when a period is missing OR explicitly None.
+    `dict.get(key, default)` only falls back to `default` when the key is MISSING,
+    not when it's present with value None -- a handful of profiles generated before
+    sma_fast_period/sma_slow_period existed in the schema store the key with an
+    explicit None (still within their 7-day freshness window, so not yet
+    regenerated), and int(None) raises. Real crash, confirmed live 2026-08-20
+    (10 of 22 assets on the live crypto universe)."""
+    return (
+        int(profile.get("sma_fast_period") or 50),
+        int(profile.get("sma_slow_period") or 200),
+    )
+
+
 @app.get("/api/asset-history/{ticker:path}")
 async def asset_history(ticker: str, period: str = "1mo"):
     """Real historical daily OHLCV for one asset, backing both the tiny card
@@ -1221,8 +1236,7 @@ async def asset_history(ticker: str, period: str = "1mo"):
     sma_fast, sma_slow = 50, 200  # safe defaults
     if sma_mode == "auto":
         profile = state.research_engine.asset_profiles.get(ticker, {})
-        sma_fast = int(profile.get("sma_fast_period", 50))
-        sma_slow = int(profile.get("sma_slow_period", 200))
+        sma_fast, sma_slow = _resolve_auto_sma_periods(profile)
     elif sma_mode == "manual":
         sma_fast = int(research_cfg.get("sma_fast_period", 50))
         sma_slow = int(research_cfg.get("sma_slow_period", 200))
