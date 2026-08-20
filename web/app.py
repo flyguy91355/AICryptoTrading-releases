@@ -1102,9 +1102,19 @@ _SETTINGS_FIELDS: dict[str, type] = {
     "event_scan.price_dip_pct": float,
     "event_scan.price_surge_pct": float,
     "event_scan.claude_cooldown_minutes": int,
-    "research.sma_mode": str,
-    "research.sma_fast_period": int,
-    "research.sma_slow_period": int,
+    "research.sma_mode": lambda v: str(v) if v is not None else "auto",
+    # Nullable (2026-08-20, owner report: settings save crashed with "int() argument
+    # ... not 'NoneType'") -- these two are only meaningful in Manual mode (see the
+    # Settings page's own field description) and are legitimately None the rest of the
+    # time, but a plain settings-page save always resubmits every field's current
+    # value regardless of mode. A bare `int` coercion crashed the WHOLE save (this
+    # endpoint applies all-or-nothing) the moment sma_mode was anything but manual --
+    # confirmed live: the deployed settings.yaml was even missing sma_mode/
+    # sma_fast_period/sma_slow_period entirely (a real config-drift gap, config/
+    # settings.yaml is never touched by Apply Update), so every save failed
+    # unconditionally until this fix.
+    "research.sma_fast_period": lambda v: (int(v) if v not in (None, "") else None),
+    "research.sma_slow_period": lambda v: (int(v) if v not in (None, "") else None),
 }
 
 
