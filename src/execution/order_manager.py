@@ -394,11 +394,25 @@ class OrderManager:
                     await self.portfolio._remove_position_db(ticker)
                     self.portfolio.cash += fill_price * fill_qty
                     self.portfolio.update_peak()
+                    # Persist cash immediately (2026-08-20, LINK/USD incident) -- both
+                    # branches here credited self.portfolio.cash in memory only, with
+                    # no _save_state() call, unlike every other cash-changing path
+                    # (add_position_async on buy, close_position_async on a full
+                    # manual/stop close). A restart landing between a TP fill and
+                    # whichever of those unrelated paths next happened to fire
+                    # permanently lost the cash credit while the position's reduced
+                    # share count (already persisted via _save_position/
+                    # _remove_position_db) survived -- confirmed live: a restart 70s
+                    # after a real TP1 fill made the dashboard show total P&L roughly
+                    # $350 more negative than reality, even though the real Alpaca
+                    # account was correct the whole time.
+                    await self.portfolio._save_state()
                     logger.info("Take-profit final tranche closed %s: %.9g @ $%.4f (P&L $%.2f)",
                                 ticker, fill_qty, fill_price, realized)
                 else:
                     self.portfolio.cash += fill_price * fill_qty
                     await self.portfolio._save_position(pos)
+                    await self.portfolio._save_state()
                     logger.info("Take-profit tranche filled %s: %.9g @ $%.4f (P&L $%.2f, %d target(s) left)",
                                 ticker, fill_qty, fill_price, realized, len(pos.take_profit_targets))
                     new_id = await self._place_stop_order(ticker, pos.shares, pos.trailing_stop or pos.stop_loss)
