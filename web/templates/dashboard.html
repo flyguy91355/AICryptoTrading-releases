@@ -97,6 +97,9 @@ header {
 .header-controls { display: flex; align-items: center; gap: 14px; }
 .settings-link { color: var(--text-secondary); text-decoration: none; font-size: 13px; font-weight: 600;
   display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; transition: background .15s, color .15s; }
+#pauseBtn { padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 700; cursor: pointer;
+  background: var(--bg-card); color: var(--text-secondary); border: 1px solid var(--border); }
+#pauseBtn.is-paused { background: var(--red-bg); color: var(--red); border-color: var(--red-border); }
 .settings-link:hover { background: var(--bg-card-hover); color: var(--text-primary); }
 main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
 
@@ -259,6 +262,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
          onclick="openUpdatePanel()"
          title="Click for details">
     </div>
+    <button id="pauseBtn" onclick="togglePause()" title="While paused: no new scans or AI analysis run, but held positions keep their stop-loss/trailing-stop/take-profit management active with zero AI cost.">⏸ Pause</button>
     <a class="settings-link" href="/settings">⚙ Settings</a>
     <span id="paperBadge" class="badge">PAPER</span>
     <span id="connStatus">Connecting…</span>
@@ -884,6 +888,19 @@ async function manualSell(ticker) {
   if (data.status !== 'ok') alert('Sell failed — check the AI log for details.');
 }
 
+function setPauseButton(paused) {
+  const btn = document.getElementById('pauseBtn');
+  btn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+  btn.classList.toggle('is-paused', paused);
+}
+
+async function togglePause() {
+  const paused = document.getElementById('pauseBtn').classList.contains('is-paused');
+  const resp = await fetch(paused ? '/api/resume' : '/api/pause', { method: 'POST' });
+  const data = await resp.json();
+  setPauseButton(data.status === 'paused');
+}
+
 function handleMessage(msg) {
   if (msg.type === 'init') {
     watchingTickers = new Set(msg.watching || []);
@@ -893,6 +910,7 @@ function handleMessage(msg) {
     document.getElementById('paperBadge').textContent = msg.paper_trading ? 'PAPER' : 'LIVE';
     document.getElementById('paperBadge').style.background = msg.paper_trading ? 'var(--green-bg)' : 'var(--red-bg)';
     document.getElementById('paperBadge').style.color = msg.paper_trading ? 'var(--green)' : 'var(--red)';
+    setPauseButton(!!msg.paused);
     (msg.ai_log || []).forEach(appendAiLog);
   } else if (msg.type === 'portfolio') {
     updatePortfolio(msg.portfolio);
@@ -902,6 +920,8 @@ function handleMessage(msg) {
     updateUniverse(msg.reports || {});
   } else if (msg.type === 'ai_log') {
     appendAiLog(msg.entry);
+  } else if (msg.type === 'paused_state') {
+    setPauseButton(!!msg.paused);
   }
   // 'heartbeat' needs no handling of its own -- receiving ANY message (including
   // this one) already resets lastMessageAt in ws.onmessage below, which is the

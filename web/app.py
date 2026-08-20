@@ -127,6 +127,20 @@ class DashboardState:
         self._update_status_cache: dict | None = None
         self._update_status_cache_time: datetime | None = None
 
+        # Pause (2026-08-20, owner request): stops every AI-spend loop (scan_loop,
+        # watching_loop, event_scan_loop, asset_profile_refresh_loop) from doing any
+        # real work -- no Claude calls at all while paused. Deliberately does NOT touch
+        # position_loop/position_update_cycle (quote refresh, exit-order sync,
+        # take-profit checks) or heartbeat_loop -- those are pure mechanical position
+        # management with zero AI cost, and per explicit owner instruction must keep
+        # running while paused so held positions stay protected. Persisted to disk
+        # (unlike this file's many in-memory-only cooldown dicts) because crypto trades
+        # 24/7 with no natural market-closed quiet window the way AITrading has -- an
+        # owner who pauses specifically to stop spend would have that silently undone
+        # by the next restart/deploy if it weren't saved.
+        self._paused_state_path = "data/paused_state.json"
+        self.paused: bool = self._load_paused_state()
+
         # Event-triggered scanning state -- in-memory only (losing a 60-min cooldown
         # on a restart is a minor cost vs. the complexity of persisting these).
         self._event_price_buffers: dict[str, list[float]] = {}   # rolling prices for RSI
@@ -183,6 +197,20 @@ class DashboardState:
 
     def _now_et(self) -> datetime:
         return datetime.now(self._market_tz)
+
+    def _load_paused_state(self) -> bool:
+        try:
+            return bool(json.loads(Path(self._paused_state_path).read_text(encoding="utf-8")).get("paused", False))
+        except Exception:
+            return False
+
+    def _save_paused_state(self):
+        try:
+            Path(self._paused_state_path).write_text(
+                json.dumps({"paused": self.paused}), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning("Could not save paused state: %s", e)
 
     def _load_reports_cache(self) -> dict:
         try:
@@ -317,6 +345,7 @@ class DashboardState:
             "paper_trading": self.config["trading"]["paper_trading"],
             "recent_sells": await self.portfolio.get_recent_sells(),
             "watching": list(self.watching_candidates.keys()),
+            "paused": self.paused,
         }
 
     async def run_scan_cycle(self):
@@ -602,7 +631,8 @@ class DashboardState:
         interval = self.config.get("scan", {}).get("interval_minutes", 15) * 60
         while True:
             try:
-                await self.run_scan_cycle()
+                if not self.paused:
+                    await self.run_scan_cycle()
             except Exception:
                 logger.exception("scan_loop: unhandled error in scan cycle")
             await asyncio.sleep(interval)
@@ -626,9 +656,10 @@ class DashboardState:
         from scripts.build_asset_profiles import generate_all_profiles
         while True:
             try:
-                profiles = await generate_all_profiles(self.config)
-                self.research_engine.asset_profiles = profiles
-                self.add_log("SYSTEM", f"Asset profile refresh check complete ({len(profiles)} profiles cached)")
+                if not self.paused:
+                    profiles = await generate_all_profiles(self.config)
+                    self.research_engine.asset_profiles = profiles
+                    self.add_log("SYSTEM", f"Asset profile refresh check complete ({len(profiles)} profiles cached)")
             except Exception:
                 logger.exception("asset_profile_refresh_loop: unhandled error")
             await asyncio.sleep(24 * 3600)
@@ -644,7 +675,7 @@ class DashboardState:
         await asyncio.sleep(interval)
         while True:
             try:
-                if self.watching_candidates and not self._scan_in_progress:
+                if self.watching_candidates and not self._scan_in_progress and not self.paused:
                     tickers = list(self.watching_candidates)
                     stale_cfg = self.config.get("research", {})
                     backoff_mult = stale_cfg.get("watch_stale_backoff_multiplier", 2.0)
@@ -723,7 +754,8 @@ class DashboardState:
         await asyncio.sleep(interval)
         while True:
             try:
-                await self._run_event_scan()
+                if not self.paused:
+                    await self._run_event_scan()
             except Exception:
                 logger.exception("event_scan_loop: unhandled error")
             await asyncio.sleep(interval)
@@ -1134,6 +1166,32 @@ async def trigger_scan():
     hitting this, same operational rule AITrading documents for its own equivalent."""
     asyncio.create_task(state.run_scan_cycle())
     return {"status": "started"}
+
+
+@app.post("/api/pause")
+async def pause_trading():
+    """Stops every AI-spend loop (scan_loop, watching_loop, event_scan_loop,
+    asset_profile_refresh_loop) from doing any real work -- zero Claude calls while
+    paused (2026-08-20, owner request). Deliberately does NOT touch position_loop
+    (quote refresh, exit-order sync, take-profit checks) -- held positions stay fully
+    protected the whole time. Persisted to disk so a restart/deploy while paused
+    doesn't silently resume spending."""
+    state.paused = True
+    state._save_paused_state()
+    state.add_log("SYSTEM",
+        "Trading PAUSED — no new scans or AI analysis will run. Existing positions "
+        "remain protected (stop-loss/trailing-stop/take-profit still active).", "WARNING")
+    await state.broadcast({"type": "paused_state", "paused": True})
+    return {"status": "paused"}
+
+
+@app.post("/api/resume")
+async def resume_trading():
+    state.paused = False
+    state._save_paused_state()
+    state.add_log("SYSTEM", "Trading resumed — scans and AI analysis active again.")
+    await state.broadcast({"type": "paused_state", "paused": False})
+    return {"status": "resumed"}
 
 
 @app.get("/api/update-status")
