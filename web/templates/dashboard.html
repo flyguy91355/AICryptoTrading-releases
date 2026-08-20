@@ -749,6 +749,12 @@ function updatePortfolio(p) {
     const hasT2Ref = pos.t2_target_price !== null && pos.t2_target_price !== undefined;
     const t1Fired = hasT1Ref && !targets.some(t => Math.abs(t - pos.t1_target_price) < 1e-6);
     const t2Fired = hasT2Ref && !targets.some(t => Math.abs(t - pos.t2_target_price) < 1e-6);
+    // A position with no targets AND no t1/t2 reference at all was bought with an
+    // empty take-profit ladder (2026-08-20, LINK/USD incident) -- fixed going forward
+    // (a real report with empty targets now gets a config-percentage fallback ladder
+    // before the buy executes, see _default_take_profit_targets in web/app.py), but a
+    // position already open before that fix can still show this. Spelled out instead
+    // of a bare '—' so it reads as a real, known state rather than a rendering gap.
     let tpValue;
     if (hasT1Ref || hasT2Ref) {
       const parts = [];
@@ -759,7 +765,7 @@ function updatePortfolio(p) {
     } else if (targets.length > 0) {
       tpValue = `${targets.length} target${targets.length > 1 ? 's' : ''}`;
     } else {
-      tpValue = '—';
+      tpValue = '<span style="color:var(--red);font-size:11px;" title="This position was bought with no take-profit targets -- only the stop-loss/trailing-stop protects it. Only affects positions opened before 2026-08-20.">None set</span>';
     }
 
     return `<div class="asset-card clickable" data-pos-ticker="${pos.ticker}">

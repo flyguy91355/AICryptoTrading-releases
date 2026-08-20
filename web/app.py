@@ -34,7 +34,7 @@ from src.update.version import read_local_version, write_local_version, is_newer
 from src.update.release_client import fetch_latest_release
 from src.update.apply import extract_release_archive, copy_updatable_files, requirements_changed
 from src.research.event_triggers import check_event_triggers, compute_rsi_from_buffer
-from src.data.market_data import MarketDataFetcher
+from src.data.market_data import MarketDataFetcher, _round_price
 from src.data.news_feed import NewsFeed
 from src.research.engine import ResearchEngine
 from src.decision.portfolio import Portfolio
@@ -47,6 +47,27 @@ logger = logging.getLogger(__name__)
 
 _DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 _SESSION_SECRET_KEY = os.environ.get("SESSION_SECRET_KEY", "dev-only-insecure-key")
+
+
+def _default_take_profit_targets(entry_price: float, tp_cfg: dict) -> list[float]:
+    """Config-percentage-based T1/T2/T3 ladder (2026-08-20, LINK/USD incident) -- same
+    exact formula ResearchEngine's own rule-based fallback already uses
+    (src/research/engine.py), just extracted as a shared, independently callable
+    function. Used as a safety-net backfill when a REAL (non-fallback) Claude report
+    qualifies for a buy but its own take_profit_targets came back empty -- LINK/USD
+    was bought this way on 2026-08-15 with zero targets, and since a held position is
+    never re-analyzed (see _act_on_report's "already held -- position management
+    handles exits"), nothing would ever have caught or corrected that gap on its own.
+    Never overrides a report that DID return real targets -- only fills a genuine
+    void so every buy leaves this system with an active take-profit ladder."""
+    t1_pct = tp_cfg.get("t1_pct", 8.0) / 100
+    t2_pct = tp_cfg.get("t2_pct", 16.0) / 100
+    t3_pct = tp_cfg.get("t3_pct", 28.0) / 100
+    return [
+        _round_price(entry_price * (1 + t1_pct)),
+        _round_price(entry_price * (1 + t2_pct)),
+        _round_price(entry_price * (1 + t3_pct)),
+    ]
 
 
 def _watch_conviction_changed_meaningfully(
@@ -469,9 +490,24 @@ class DashboardState:
                     self.add_log(ticker, f"BUY confirmation error — skipped: {e}", "ERROR")
                     return
 
+            # Backfill missing take-profit targets before executing (2026-08-20,
+            # LINK/USD incident) -- Claude's own report occasionally comes back with
+            # an empty take_profit_targets list with no error/fallback flag to catch
+            # it, and since a held position is never re-analyzed once bought (see
+            # this function's own early "already held" return above), a gap here
+            # would otherwise never self-correct. Only ever fills a genuine void --
+            # a report that DID return real targets is never overridden.
+            tp_targets = signal.take_profit_targets
+            if not tp_targets:
+                tp_targets = _default_take_profit_targets(
+                    signal.entry_price, self.config.get("take_profit", {}))
+                self.add_log(ticker,
+                    f"AI report had no take-profit targets — using config-based "
+                    f"fallback ladder: {[f'${t:.4f}' for t in tp_targets]}", "WARNING")
+
             ok = await self.order_manager.execute_buy(
                 ticker, name, signal.entry_price, signal.stop_loss,
-                signal.take_profit_targets, signal.position_size_dollars,
+                tp_targets, signal.position_size_dollars,
                 signal.final_trail_pct,
             )
             if ok:
