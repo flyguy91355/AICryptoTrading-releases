@@ -1024,6 +1024,15 @@ app.add_middleware(
     secret_key=_SESSION_SECRET_KEY,
     https_only=bool(os.environ.get("SSL_CERTFILE") and os.environ.get("SSL_KEYFILE")),
     max_age=30 * 24 * 60 * 60,
+    # Distinct cookie name (2026-08-20, owner report) -- this app shares its physical
+    # box AND Tailscale hostname with AIShortTrading (only the port differs: 8081 vs
+    # 8082), and cookies are not scoped by port. Both apps previously used Starlette's
+    # default cookie name ("session"), so logging into one silently overwrote the
+    # other's session cookie with a value signed by a DIFFERENT secret key -- the
+    # other app couldn't decode it, forced a re-login, and that re-login overwrote the
+    # cookie again, breaking the first app right back. Renamed so the two can never
+    # collide again, regardless of what else ever ends up sharing this box.
+    session_cookie="aicrypto_session",
 )
 
 
