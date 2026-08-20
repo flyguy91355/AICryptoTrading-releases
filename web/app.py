@@ -148,19 +148,31 @@ class DashboardState:
         self._update_status_cache: dict | None = None
         self._update_status_cache_time: datetime | None = None
 
-        # Pause (2026-08-20, owner request): stops every AI-spend loop (scan_loop,
-        # watching_loop, event_scan_loop, asset_profile_refresh_loop) from doing any
-        # real work -- no Claude calls at all while paused. Deliberately does NOT touch
-        # position_loop/position_update_cycle (quote refresh, exit-order sync,
-        # take-profit checks) or heartbeat_loop -- those are pure mechanical position
-        # management with zero AI cost, and per explicit owner instruction must keep
-        # running while paused so held positions stay protected. Persisted to disk
-        # (unlike this file's many in-memory-only cooldown dicts) because crypto trades
-        # 24/7 with no natural market-closed quiet window the way AITrading has -- an
-        # owner who pauses specifically to stop spend would have that silently undone
-        # by the next restart/deploy if it weren't saved.
-        self._paused_state_path = "data/paused_state.json"
-        self.paused: bool = self._load_paused_state()
+        # Pause/Stop (2026-08-20, owner request) -- two independent severity levels,
+        # both persisted to disk together (crypto trades 24/7 with no natural
+        # market-closed quiet window the way AITrading has, so an owner who pauses or
+        # stops specifically to halt activity would otherwise have that silently
+        # undone by the next restart/deploy):
+        #   paused=True  -- stops every AI-spend loop (scan_loop, watching_loop,
+        #                    event_scan_loop, asset_profile_refresh_loop). Zero Claude
+        #                    calls. position_loop/heartbeat_loop keep running --
+        #                    held positions stay fully protected (stop-loss/
+        #                    trailing-stop/take-profit).
+        #   stopped=True -- everything above PLUS position_loop itself stops. No
+        #                    broker-side management of any kind (own request: "no
+        #                    management of any positions at the broker will take
+        #                    place"). Deliberately does NOT kill the process itself
+        #                    (owner chose this over a real systemd stop, 2026-08-20 --
+        #                    a genuine process kill has no self-service recovery path
+        #                    for a non-technical customer; this way the dashboard
+        #                    stays reachable and a Start System click brings
+        #                    everything back with no SSH/support needed).
+        # heartbeat_loop is never gated by either -- it's a pure WS liveness ping with
+        # no cost, and the dashboard must stay reachable in both states.
+        self._run_state_path = "data/run_state.json"
+        self.paused: bool
+        self.stopped: bool
+        self.paused, self.stopped = self._load_run_state()
 
         # Event-triggered scanning state -- in-memory only (losing a 60-min cooldown
         # on a restart is a minor cost vs. the complexity of persisting these).
@@ -219,19 +231,30 @@ class DashboardState:
     def _now_et(self) -> datetime:
         return datetime.now(self._market_tz)
 
-    def _load_paused_state(self) -> bool:
+    def _load_run_state(self) -> tuple[bool, bool]:
         try:
-            return bool(json.loads(Path(self._paused_state_path).read_text(encoding="utf-8")).get("paused", False))
+            data = json.loads(Path(self._run_state_path).read_text(encoding="utf-8"))
+            return bool(data.get("paused", False)), bool(data.get("stopped", False))
         except Exception:
-            return False
+            return False, False
 
-    def _save_paused_state(self):
+    def _save_run_state(self):
         try:
-            Path(self._paused_state_path).write_text(
-                json.dumps({"paused": self.paused}), encoding="utf-8"
+            Path(self._run_state_path).write_text(
+                json.dumps({"paused": self.paused, "stopped": self.stopped}), encoding="utf-8"
             )
         except Exception as e:
-            logger.warning("Could not save paused state: %s", e)
+            logger.warning("Could not save run state: %s", e)
+
+    def run_status(self) -> str:
+        """Single source of truth for the 3-way UI state -- 'stopped' takes priority
+        over 'paused' since it's the stronger condition (see the __init__ comment for
+        exactly what each level gates)."""
+        if self.stopped:
+            return "stopped"
+        if self.paused:
+            return "paused"
+        return "running"
 
     def _load_reports_cache(self) -> dict:
         try:
@@ -366,7 +389,7 @@ class DashboardState:
             "paper_trading": self.config["trading"]["paper_trading"],
             "recent_sells": await self.portfolio.get_recent_sells(),
             "watching": list(self.watching_candidates.keys()),
-            "paused": self.paused,
+            "run_status": self.run_status(),
         }
 
     async def run_scan_cycle(self):
@@ -667,7 +690,7 @@ class DashboardState:
         interval = self.config.get("scan", {}).get("interval_minutes", 15) * 60
         while True:
             try:
-                if not self.paused:
+                if not self.paused and not self.stopped:
                     await self.run_scan_cycle()
             except Exception:
                 logger.exception("scan_loop: unhandled error in scan cycle")
@@ -676,7 +699,12 @@ class DashboardState:
     async def position_loop(self):
         while True:
             try:
-                await self.position_update_cycle()
+                # Gated on stopped only, NOT paused -- position management (quote
+                # refresh, exit-order sync, take-profit checks) has zero AI cost and
+                # must keep running through an ordinary pause. Only a full Stop halts
+                # it too (see the __init__ comment for the full paused/stopped split).
+                if not self.stopped:
+                    await self.position_update_cycle()
             except Exception:
                 logger.exception("position_loop: unhandled error in position update cycle")
             await asyncio.sleep(20)
@@ -692,7 +720,7 @@ class DashboardState:
         from scripts.build_asset_profiles import generate_all_profiles
         while True:
             try:
-                if not self.paused:
+                if not self.paused and not self.stopped:
                     profiles = await generate_all_profiles(self.config)
                     self.research_engine.asset_profiles = profiles
                     self.add_log("SYSTEM", f"Asset profile refresh check complete ({len(profiles)} profiles cached)")
@@ -711,7 +739,7 @@ class DashboardState:
         await asyncio.sleep(interval)
         while True:
             try:
-                if self.watching_candidates and not self._scan_in_progress and not self.paused:
+                if self.watching_candidates and not self._scan_in_progress and not self.paused and not self.stopped:
                     tickers = list(self.watching_candidates)
                     stale_cfg = self.config.get("research", {})
                     backoff_mult = stale_cfg.get("watch_stale_backoff_multiplier", 2.0)
@@ -790,7 +818,7 @@ class DashboardState:
         await asyncio.sleep(interval)
         while True:
             try:
-                if not self.paused:
+                if not self.paused and not self.stopped:
                     await self._run_event_scan()
             except Exception:
                 logger.exception("event_scan_loop: unhandled error")
@@ -1213,21 +1241,54 @@ async def pause_trading():
     protected the whole time. Persisted to disk so a restart/deploy while paused
     doesn't silently resume spending."""
     state.paused = True
-    state._save_paused_state()
+    state._save_run_state()
     state.add_log("SYSTEM",
         "Trading PAUSED — no new scans or AI analysis will run. Existing positions "
         "remain protected (stop-loss/trailing-stop/take-profit still active).", "WARNING")
-    await state.broadcast({"type": "paused_state", "paused": True})
-    return {"status": "paused"}
+    await state.broadcast({"type": "run_status", "run_status": state.run_status()})
+    return {"status": "paused", "run_status": state.run_status()}
 
 
 @app.post("/api/resume")
 async def resume_trading():
+    """Un-pauses only -- the counterpart to /api/pause. If the system is fully
+    stopped, use /api/start instead (clears both flags)."""
     state.paused = False
-    state._save_paused_state()
+    state._save_run_state()
     state.add_log("SYSTEM", "Trading resumed — scans and AI analysis active again.")
-    await state.broadcast({"type": "paused_state", "paused": False})
-    return {"status": "resumed"}
+    await state.broadcast({"type": "run_status", "run_status": state.run_status()})
+    return {"status": "resumed", "run_status": state.run_status()}
+
+
+@app.post("/api/stop")
+async def stop_trading():
+    """Full stop (2026-08-20, owner request): every loop halts, including
+    position_loop -- no broker-side position management of any kind happens while
+    stopped, on top of everything /api/pause already blocks. Deliberately does NOT
+    kill the process itself (own decision, 2026-08-20) -- a real process kill has no
+    self-service recovery path for a non-technical customer (no dashboard to reach, no
+    button to click, only SSH+systemctl); this way the dashboard and Start System
+    button stay reachable, with the exact same real-world effect (zero AI spend, zero
+    broker-side management) while stopped."""
+    state.stopped = True
+    state._save_run_state()
+    state.add_log("SYSTEM",
+        "Trading STOPPED — no scans, AI analysis, or position management (stop-loss/"
+        "trailing-stop/take-profit) will run until Start System is clicked.", "WARNING")
+    await state.broadcast({"type": "run_status", "run_status": state.run_status()})
+    return {"status": "stopped", "run_status": state.run_status()}
+
+
+@app.post("/api/start")
+async def start_trading():
+    """Clears both stopped and paused -- the counterpart to /api/stop, brings the
+    system back to fully running from either a pause or a full stop."""
+    state.paused = False
+    state.stopped = False
+    state._save_run_state()
+    state.add_log("SYSTEM", "System started — scans, AI analysis, and position management all active again.")
+    await state.broadcast({"type": "run_status", "run_status": state.run_status()})
+    return {"status": "running", "run_status": state.run_status()}
 
 
 @app.get("/api/update-status")

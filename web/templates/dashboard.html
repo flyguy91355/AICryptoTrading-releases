@@ -99,7 +99,23 @@ header {
   display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 6px; transition: background .15s, color .15s; }
 #pauseBtn { padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 700; cursor: pointer;
   background: var(--bg-card); color: var(--text-secondary); border: 1px solid var(--border); }
-#pauseBtn.is-paused { background: var(--red-bg); color: var(--red); border-color: var(--red-border); }
+#pauseBtn.state-paused { background: var(--red-bg); color: var(--red); border-color: var(--red-border); }
+#pauseBtn.state-stopped { background: var(--red); color: #fff; border-color: var(--red); }
+#pauseModalOverlay {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  align-items: center; justify-content: center; z-index: 1100; padding: 16px;
+}
+#pauseModalOverlay.active { display: flex; }
+.pause-modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+  width: 100%; max-width: 460px; padding: 22px 24px; }
+.pause-modal h3 { margin: 0 0 12px; font-size: 17px; }
+.pause-modal p { font-size: 13.5px; line-height: 1.6; color: var(--text-secondary); margin: 0 0 10px; }
+.pause-modal p strong { color: var(--text-primary); }
+.pause-modal-actions { display: flex; gap: 8px; margin-top: 18px; }
+.pause-modal-actions button { flex: 1; padding: 9px; border-radius: 6px; font-size: 13px; font-weight: 700; cursor: pointer; border: 1px solid var(--border); }
+.pm-cancel { background: var(--bg-card); color: var(--text-secondary); }
+.pm-pause { background: var(--bg-secondary); color: var(--text-primary); border-color: var(--text-secondary); font-weight: 700; }
+.pm-stop { background: var(--red-bg); color: var(--red); border-color: var(--red-border); }
 .settings-link:hover { background: var(--bg-card-hover); color: var(--text-primary); }
 main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
 
@@ -262,7 +278,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
          onclick="openUpdatePanel()"
          title="Click for details">
     </div>
-    <button id="pauseBtn" onclick="togglePause()" title="While paused: no new scans or AI analysis run, but held positions keep their stop-loss/trailing-stop/take-profit management active with zero AI cost.">⏸ Pause</button>
+    <button id="pauseBtn" onclick="onPauseBtnClick()">⏸ Pause</button>
     <a class="settings-link" href="/settings">⚙ Settings</a>
     <span id="paperBadge" class="badge">PAPER</span>
     <span id="connStatus">Connecting…</span>
@@ -342,6 +358,18 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
   </div>
 </main>
 
+<div id="pauseModalOverlay" onclick="if (event.target === this) closePauseModal()">
+  <div class="pause-modal">
+    <h3>Pause or Stop?</h3>
+    <p><strong>Pause</strong> stops all AI (Claude) call costs only. The program will still run to manage positions — only without AI costs.</p>
+    <p>To stop the program from running entirely, press <strong>Stop</strong>. This halts position management too — no management of any positions at the broker will take place until you press Start System.</p>
+    <div class="pause-modal-actions">
+      <button class="pm-cancel" onclick="closePauseModal()">Cancel</button>
+      <button class="pm-pause" onclick="confirmPause()">Pause</button>
+      <button class="pm-stop" onclick="confirmStop()">Stop</button>
+    </div>
+  </div>
+</div>
 <div id="assetModalOverlay" onclick="if (event.target === this) closeAssetModal()">
   <div class="asset-modal">
     <div class="asset-modal-header">
@@ -894,17 +922,55 @@ async function manualSell(ticker) {
   if (data.status !== 'ok') alert('Sell failed — check the AI log for details.');
 }
 
-function setPauseButton(paused) {
+// 3-way run state (2026-08-20): 'running' -> clicking the button opens the
+// Pause-or-Stop confirmation modal (both are consequential, so neither fires
+// directly on click). 'paused' -> clicking directly resumes (a safe, low-friction
+// action, no confirmation needed). 'stopped' -> clicking directly starts everything
+// back up (also safe/low-friction). currentRunStatus is the single source of truth
+// the click handler dispatches on.
+let currentRunStatus = 'running';
+
+function setRunStatusUI(status) {
+  currentRunStatus = status;
   const btn = document.getElementById('pauseBtn');
-  btn.textContent = paused ? '▶ Resume' : '⏸ Pause';
-  btn.classList.toggle('is-paused', paused);
+  btn.classList.remove('state-paused', 'state-stopped');
+  if (status === 'paused') {
+    btn.textContent = '▶ Resume';
+    btn.classList.add('state-paused');
+  } else if (status === 'stopped') {
+    btn.textContent = '▶ Start System';
+    btn.classList.add('state-stopped');
+  } else {
+    btn.textContent = '⏸ Pause';
+  }
 }
 
-async function togglePause() {
-  const paused = document.getElementById('pauseBtn').classList.contains('is-paused');
-  const resp = await fetch(paused ? '/api/resume' : '/api/pause', { method: 'POST' });
+function onPauseBtnClick() {
+  if (currentRunStatus === 'running') {
+    document.getElementById('pauseModalOverlay').classList.add('active');
+  } else if (currentRunStatus === 'paused') {
+    fetch('/api/resume', { method: 'POST' }).then(r => r.json()).then(d => setRunStatusUI(d.run_status));
+  } else if (currentRunStatus === 'stopped') {
+    fetch('/api/start', { method: 'POST' }).then(r => r.json()).then(d => setRunStatusUI(d.run_status));
+  }
+}
+
+function closePauseModal() {
+  document.getElementById('pauseModalOverlay').classList.remove('active');
+}
+
+async function confirmPause() {
+  closePauseModal();
+  const resp = await fetch('/api/pause', { method: 'POST' });
   const data = await resp.json();
-  setPauseButton(data.status === 'paused');
+  setRunStatusUI(data.run_status);
+}
+
+async function confirmStop() {
+  closePauseModal();
+  const resp = await fetch('/api/stop', { method: 'POST' });
+  const data = await resp.json();
+  setRunStatusUI(data.run_status);
 }
 
 function handleMessage(msg) {
@@ -916,7 +982,7 @@ function handleMessage(msg) {
     document.getElementById('paperBadge').textContent = msg.paper_trading ? 'PAPER' : 'LIVE';
     document.getElementById('paperBadge').style.background = msg.paper_trading ? 'var(--green-bg)' : 'var(--red-bg)';
     document.getElementById('paperBadge').style.color = msg.paper_trading ? 'var(--green)' : 'var(--red)';
-    setPauseButton(!!msg.paused);
+    setRunStatusUI(msg.run_status || 'running');
     (msg.ai_log || []).forEach(appendAiLog);
   } else if (msg.type === 'portfolio') {
     updatePortfolio(msg.portfolio);
@@ -926,8 +992,8 @@ function handleMessage(msg) {
     updateUniverse(msg.reports || {});
   } else if (msg.type === 'ai_log') {
     appendAiLog(msg.entry);
-  } else if (msg.type === 'paused_state') {
-    setPauseButton(!!msg.paused);
+  } else if (msg.type === 'run_status') {
+    setRunStatusUI(msg.run_status);
   }
   // 'heartbeat' needs no handling of its own -- receiving ANY message (including
   // this one) already resets lastMessageAt in ws.onmessage below, which is the
