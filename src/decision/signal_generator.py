@@ -61,6 +61,12 @@ class TradeSignal:
     should_execute: bool = False
     trade_id: str | None = None
     final_trail_pct: float | None = None
+    # The exact R/R and its required gate at the moment THIS signal cleared to buy
+    # (2026-08-21) -- not recomputed later, so Position.buy_rr/buy_required_rr (see
+    # that field's own docstring) reflect the real numbers that allowed the purchase,
+    # not a reconstruction from possibly-since-changed data.
+    rr: float | None = None
+    required_rr: float | None = None
 
 
 class SignalGenerator:
@@ -130,4 +136,5 @@ class SignalGenerator:
             sector=getattr(report, 'sector', ''),
             should_execute=report.signal in (Signal.STRONG_BUY, Signal.BUY),
             final_trail_pct=report.final_trail_pct,
+            rr=rr, required_rr=required_rr,
         )

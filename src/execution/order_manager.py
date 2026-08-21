@@ -190,7 +190,8 @@ class OrderManager:
     async def execute_buy(self, ticker: str, asset_name: str, entry_price: float,
                            stop_loss: float, take_profit_targets: list[float],
                            position_size_dollars: float,
-                           final_trail_pct: float | None = None) -> bool:
+                           final_trail_pct: float | None = None,
+                           signal=None) -> bool:
         """Places a notional market buy, and on a real fill, records the position and
         places its stop-loss order. Returns True on success. Any failure logs and
         returns False -- callers must not assume the position was opened."""
@@ -216,6 +217,13 @@ class OrderManager:
             return False
 
         trade_id = uuid.uuid4().hex
+        # "Why AI Bought This" snapshot (2026-08-21, same feature as AITrading's own) --
+        # captured once, here, from whatever real report/numbers the caller's signal
+        # actually carries. signal is None for any caller that doesn't have one (there
+        # are none today, but this keeps the parameter genuinely optional rather than
+        # assuming every future caller has a TradeSignal) -- falls back to empty/None
+        # fields rather than guessing.
+        _report = getattr(signal, "research_report", None) if signal else None
         position = Position(
             ticker=ticker,
             shares=real_shares,
@@ -229,6 +237,14 @@ class OrderManager:
             t2_target_price=take_profit_targets[1] if len(take_profit_targets) > 1 else None,
             trade_id=trade_id,
             final_trail_pct=final_trail_pct,
+            buy_thesis=_report.thesis if _report else "",
+            buy_reasoning=_report.reasoning if _report else "",
+            buy_conviction=signal.conviction if signal else None,
+            buy_signal=(signal.signal.value if signal and hasattr(signal.signal, "value")
+                        else str(signal.signal) if signal else ""),
+            buy_rr=getattr(signal, "rr", None) if signal else None,
+            buy_required_rr=getattr(signal, "required_rr", None) if signal else None,
+            buy_fair_value=_report.fair_value_estimate if _report else None,
         )
         await self.portfolio.add_position_async(position)
         await self._log_buy(ticker, real_shares, real_price, trade_id)

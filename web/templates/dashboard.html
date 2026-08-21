@@ -209,6 +209,8 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
 .sells-table tr:last-child td { border-bottom: none; }
 .sells-reason { color: var(--text-secondary); font-size: 11px; white-space: normal; }
 .sells-wrap { max-height: 360px; overflow-y: auto; }
+.sells-table tr.clickable { cursor: pointer; }
+.sells-table tr.clickable:hover td { background: rgba(255,255,255,.03); }
 
 .asset-card.clickable { cursor: pointer; }
 
@@ -887,7 +889,10 @@ function updateRecentSells(sells) {
     return;
   }
   countLabel.textContent = `(${sells.length})`;
-  body.innerHTML = sells.map(s => `<tr>
+  // Row click opens the "Recent Sell" post-mortem popup (2026-08-21, same feature as
+  // AITrading/AIShortTrading's own) -- only clickable when a real trade_id exists
+  // (rows from before that column was tracked have none).
+  body.innerHTML = sells.map(s => `<tr${s.trade_id ? ` class="clickable" onclick="showTradeDetail('${s.trade_id}','${s.ticker}')"` : ''}>
     <td>${s.ticker}</td>
     <td>${Number(s.shares).toFixed(6)}</td>
     <td>${fmtUsd(s.price)}</td>
@@ -895,6 +900,51 @@ function updateRecentSells(sells) {
     <td class="sells-reason">${s.reason || ''}</td>
     <td>${fmtTime(s.timestamp)}</td>
   </tr>`).join('');
+}
+
+// "Recent Sell" post-mortem popup (2026-08-21, same feature as AITrading/
+// AIShortTrading's own) -- reuses the existing asset-detail modal shell (#amSections is
+// a generic content slot) rather than building a new modal, since this dashboard has no
+// separate trade-history modal the way the other two projects do. No chart for this
+// case (a closed trade, not a live asset) -- the chart wrap is hidden while this popup
+// is showing and restored the next time a real asset modal opens.
+async function showTradeDetail(tradeId, ticker) {
+  document.getElementById('amChartWrap').style.display = 'none';
+  document.getElementById('amTicker').textContent = ticker;
+  document.getElementById('amName').textContent = 'Trade Detail';
+  document.getElementById('amBadges').innerHTML = '';
+  document.getElementById('amSections').innerHTML =
+    '<div class="asset-modal-section"><div class="asset-modal-section-body">Loading…</div></div>';
+  document.getElementById('assetModalOverlay').classList.add('active');
+
+  try {
+    const resp = await fetch(`/api/sell-analysis/${encodeURIComponent(tradeId)}`);
+    if (!resp.ok) {
+      document.getElementById('amSections').innerHTML =
+        '<div class="asset-modal-section"><div class="asset-modal-section-body">No post-mortem available for this trade yet.</div></div>';
+      return;
+    }
+    const d = await resp.json();
+    const sections = [];
+    const addSection = (title, body) => { if (body) sections.push(`<div class="asset-modal-section"><div class="asset-modal-section-title">${title}</div><div class="asset-modal-section-body">${body}</div></div>`); };
+    let boughtBody = '';
+    if (d.buy_thesis) boughtBody += `<div>${d.buy_thesis}</div>`;
+    if (d.buy_reasoning) boughtBody += `<div style="margin-top:6px;">${d.buy_reasoning}</div>`;
+    if (d.buy_rr != null && d.buy_required_rr != null) {
+      boughtBody += `<div style="margin-top:6px;color:var(--text-muted,#888);">R/R at purchase: ${d.buy_rr.toFixed(2)} against a required ${d.buy_required_rr.toFixed(2)}</div>`;
+    }
+    addSection('Why It Was Bought', boughtBody);
+    let postMortemBody = '';
+    if (d.post_mortem_thesis) postMortemBody += `<div>${d.post_mortem_thesis}</div>`;
+    if (d.post_mortem_reasoning) postMortemBody += `<div style="margin-top:6px;">${d.post_mortem_reasoning}</div>`;
+    addSection('AI Post-Mortem', postMortemBody);
+    addSection('Follow-Up (Later Price Action)', d.followup_reasoning);
+    document.getElementById('amSections').innerHTML = sections.join('');
+  } catch (e) {
+    console.error('showTradeDetail:', tradeId, e);
+    document.getElementById('amSections').innerHTML =
+      '<div class="asset-modal-section"><div class="asset-modal-section-body">No post-mortem available for this trade yet.</div></div>';
+  }
 }
 
 async function refreshRecentSells() {
