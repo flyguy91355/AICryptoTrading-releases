@@ -258,7 +258,20 @@ class OrderManager:
         """STOP_LIMIT only -- see this module's own docstring for why plain STOP isn't
         an option for crypto. Returns the broker_order_id on success, None on failure
         (logged, never raised -- callers treat None as "this position is currently
-        unprotected, needs remediation")."""
+        unprotected, needs remediation").
+
+        Retries once against the broker's own real available quantity on an
+        "insufficient balance" rejection (2026-08-21, real BTC/USD incident: every
+        attempt requested 0.012319033 while Alpaca's real position only ever held
+        0.012288235, confirmed live via a direct query -- the position sat completely
+        unprotected for 100+ minutes with the identical rejection every single retry,
+        since nothing ever corrected the requested quantity). Mirrors AITrading's own
+        established pattern for this exact class of settlement/rounding drift between
+        a locally-tracked quantity and what the broker actually holds -- see that
+        project's "Order API hardening" history. Also corrects the locally-tracked
+        Position.shares to the real value, not just this one retried order, since
+        every other part of the system (P&L, a future sell, the next sync_exit_orders
+        tick) needs the real number too, not just this call."""
         limit_price = stop_price * (1 - _STOP_LIMIT_BUFFER_PCT)
         order = Order(
             ticker=ticker, side=OrderSide.SELL, order_type=OrderType.STOP_LIMIT,
@@ -266,10 +279,41 @@ class OrderManager:
         )
         try:
             result = await self.broker.submit_order(order)
+            return result.broker_order_id
         except Exception as e:
-            logger.error("_place_stop_order: failed for %s: %s", ticker, e)
+            if "insufficient balance" not in str(e).lower():
+                logger.error("_place_stop_order: failed for %s: %s", ticker, e)
+                return None
+            logger.warning(
+                "_place_stop_order: %s insufficient balance for requested %.9g -- "
+                "checking broker's real available quantity", ticker, shares)
+
+        try:
+            real_positions = {p["ticker"]: p["shares"] for p in await self.broker.get_positions()}
+        except Exception as e2:
+            logger.error("_place_stop_order: %s real-position lookup failed after "
+                          "insufficient-balance rejection: %s", ticker, e2)
             return None
-        return result.broker_order_id
+
+        real_qty = real_positions.get(ticker)
+        if real_qty is None or real_qty <= 0:
+            logger.error("_place_stop_order: %s not found in real positions after "
+                          "insufficient-balance rejection -- giving up", ticker)
+            return None
+
+        logger.warning("_place_stop_order: %s retrying with broker's real available "
+                        "%.9g (was requesting %.9g)", ticker, real_qty, shares)
+        if ticker in self.portfolio.positions:
+            self.portfolio.positions[ticker].shares = real_qty
+            await self.portfolio._save_position(self.portfolio.positions[ticker])
+
+        order.quantity = real_qty
+        try:
+            result = await self.broker.submit_order(order)
+            return result.broker_order_id
+        except Exception as e3:
+            logger.error("_place_stop_order: retry with real qty also failed for %s: %s", ticker, e3)
+            return None
 
     async def sync_exit_orders(self):
         """Runs periodically (every tick of the main loop): for each open position,
