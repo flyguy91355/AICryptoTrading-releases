@@ -570,6 +570,24 @@ class DashboardState:
                 "WARNING",
             )
 
+    def _persist_analysis_history(self, ticker: str, report) -> None:
+        """Appends one row to the "Analysis History" feed-forward table (2026-08-21,
+        same feature as AITrading/AIShortTrading's own -- see AITrading's
+        CLAUDE_HISTORY.md 2026-08-21 entry) for every real (non-fallback) analysis --
+        this file has no single shared _persist_report choke point the way the other
+        two projects do (self.latest_reports is assigned inline at 2 call sites, both
+        inside _act_on_report below), so this small helper exists specifically so
+        those 2 sites can't independently drift on what counts as "a real analysis
+        worth remembering." Fire-and-forget: must never delay or block report
+        persistence."""
+        if getattr(report, "is_fallback", False):
+            return
+        asyncio.create_task(self.portfolio.save_analysis_history(
+            ticker, report.generated_at.isoformat(), report.conviction_score,
+            report.signal.value, report.entry_price, report.fair_value_estimate,
+            getattr(report, "watch_condition", ""),
+        ))
+
     async def _act_on_report(self, ticker: str, name: str, report):
         """Shared post-analysis logic for both the batch and sequential scan paths --
         log, check for a real position action, execute a buy. One source of truth so
@@ -577,6 +595,7 @@ class DashboardState:
         signal."""
         self.latest_reports[ticker] = self._serialize_report(report)
         asyncio.create_task(asyncio.to_thread(self._save_reports_cache))
+        self._persist_analysis_history(ticker, report)
 
         if report.is_fallback:
             self.add_log(ticker, f"Analysis failed — {report.thesis}", "ERROR")
@@ -621,7 +640,9 @@ class DashboardState:
                 self.add_log(ticker, "BUY qualified — running confirmation analysis before executing")
                 try:
                     trade_history = await self.portfolio.get_trade_history_summary(ticker)
-                    confirm_report = await self.research_engine.analyze_asset(ticker, name, trade_history)
+                    analysis_history = await self.portfolio.get_analysis_history_summary(ticker)
+                    confirm_report = await self.research_engine.analyze_asset(
+                        ticker, name, trade_history, analysis_history_summary=analysis_history)
                     confirm_signal = self.signal_generator._evaluate_report(confirm_report)
                     if confirm_signal is None or not confirm_signal.should_execute:
                         self.add_log(
@@ -633,6 +654,7 @@ class DashboardState:
                         return
                     signal = confirm_signal
                     self.latest_reports[ticker] = self._serialize_report(confirm_report)
+                    self._persist_analysis_history(ticker, confirm_report)
                 except Exception as e:
                     self.add_log(ticker, f"BUY confirmation error — skipped: {e}", "ERROR")
                     return
@@ -677,7 +699,9 @@ class DashboardState:
             ticker, name = asset["ticker"], asset["name"]
             try:
                 trade_history = await self.portfolio.get_trade_history_summary(ticker)
-                report = await self.research_engine.analyze_asset(ticker, name, trade_history)
+                analysis_history = await self.portfolio.get_analysis_history_summary(ticker)
+                report = await self.research_engine.analyze_asset(
+                    ticker, name, trade_history, analysis_history_summary=analysis_history)
                 await self._act_on_report(ticker, name, report)
             except Exception as e:
                 logger.exception("Scan cycle failed for %s", ticker)
@@ -695,8 +719,21 @@ class DashboardState:
         is tiny next to AITrading's own 1,500+-ticker batches (confirmed there to
         never take longer than ~7 minutes even at 977 requests), so this uses a much
         shorter timeout than that system's adaptive multi-chunk orchestrator -- no
-        chunking is needed at this universe size."""
-        batch_id, inputs_by_ticker = await self.research_engine.submit_analysis_batch(self.universe)
+        chunking is needed at this universe size.
+
+        Pre-fetches "Analysis History" feed-forward context for every asset
+        (2026-08-21, same feature as AITrading/AIShortTrading's own) -- unlike
+        AITrading, where the once-a-day full universe scan deliberately skips this
+        (1,000+ largely-never-before-seen tickers), THIS project's entire universe is
+        a small, fixed ~22-asset set that gets rescanned continuously -- every asset
+        here already is exactly the "recurring candidate" case the feature exists
+        for, so pre-fetching for the whole universe is cheap and always relevant."""
+        analysis_history_summaries = {
+            a["ticker"]: await self.portfolio.get_analysis_history_summary(a["ticker"])
+            for a in self.universe
+        }
+        batch_id, inputs_by_ticker = await self.research_engine.submit_analysis_batch(
+            self.universe, analysis_history_summaries=analysis_history_summaries)
         if not batch_id:
             return False
 
@@ -905,8 +942,10 @@ class DashboardState:
                             continue
                         try:
                             trade_history = await self.portfolio.get_trade_history_summary(ticker)
+                            analysis_history = await self.portfolio.get_analysis_history_summary(ticker)
                             report = await self.research_engine.analyze_asset(
-                                ticker, asset["name"], trade_history
+                                ticker, asset["name"], trade_history,
+                                analysis_history_summary=analysis_history,
                             )
                             self._watch_last_check[ticker] = now
                             if _watch_conviction_changed_meaningfully(
@@ -1046,7 +1085,9 @@ class DashboardState:
 
             try:
                 trade_history = await self.portfolio.get_trade_history_summary(ticker)
-                report = await self.research_engine.analyze_asset(ticker, name, trade_history)
+                analysis_history = await self.portfolio.get_analysis_history_summary(ticker)
+                report = await self.research_engine.analyze_asset(
+                    ticker, name, trade_history, analysis_history_summary=analysis_history)
                 await self._act_on_report(ticker, name, report)
                 # Broadcast the updated report so the dashboard card refreshes immediately
                 await self.broadcast({"type": "reports", "reports": self.latest_reports, "watching": list(self.watching_candidates.keys())})

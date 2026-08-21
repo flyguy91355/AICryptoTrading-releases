@@ -112,6 +112,12 @@ class ResearchReport:
     margin_of_safety_pct: float = 0.0
     asset_summary: str = ""
     final_trail_pct: float | None = None
+    # A specific, concrete condition Claude thinks would make this a better trading
+    # opportunity right now (2026-08-21, same feature as AITrading/AIShortTrading's own
+    # -- see AITrading's CLAUDE_HISTORY.md 2026-08-21 "Analysis History" entry). Empty
+    # string when no such condition applies. Persisted to analysis_history alongside
+    # every other real analysis and fed back into the next analysis of the same asset.
+    watch_condition: str = ""
 
 
 ANALYSIS_PROMPT = """\
@@ -130,6 +136,7 @@ IMPORTANT RULES:
 - There are no earnings reports, SEC filings, or insider-trading data for crypto — do not invent or assume any. Base your analysis only on the price action, technicals, and news/sentiment given below.
 - If a LONG-TERM TREND section is present below, weigh it explicitly: judge whether the current setup looks like a genuine breakout versus a bounce back toward a level this asset has already failed at before.
 - If a HISTORICAL CHARACTER section is present below, weigh it too: it's a real backtest of THIS asset's own past breakout reliability and drawdown behavior, not generic crypto advice — use it to calibrate how much weight a similar-looking setup deserves for this specific asset, not as a mechanical rule.
+- If a PRIOR ANALYSIS HISTORY section is present below, use it: judge whether any previously-stated watch condition has since been met or invalidated, and let the arc across those past calls inform how you read the current setup — not just today's numbers in isolation.
 
 ASSET: {ticker} — {asset_name}
 CURRENT PRICE: ${current_price}
@@ -139,7 +146,7 @@ CURRENT PRICE: ${current_price}
 
 ── NEWS & SENTIMENT ──
 {news_summary}
-{market_context_section}{volatility_section}{long_term_trend_section}{asset_profile_section}{trade_history_section}
+{market_context_section}{volatility_section}{long_term_trend_section}{asset_profile_section}{analysis_history_section}{trade_history_section}
 Based on all of the above, provide your analysis as JSON with these exact fields:
 {{
     "conviction_score": <1-10, one decimal place, e.g. 7.3>,
@@ -155,7 +162,8 @@ Based on all of the above, provide your analysis as JSON with these exact fields
     "time_horizon": "<hours|days|weeks>",
     "reasoning": "<detailed reasoning connecting technicals and news/sentiment>",
     "fair_value_estimate": <quick estimate of a fair near-term price as a number>,
-    "margin_of_safety_pct": <percentage below fair value the current price represents — negative if overvalued>
+    "margin_of_safety_pct": <percentage below fair value the current price represents — negative if overvalued>,
+    "watch_condition": "<a specific, concrete condition that would make this a better opportunity right now, e.g. a price level to wait for or an event to pass — empty string if the current setup needs no such condition>"
 }}
 
 Respond with ONLY the JSON object, no other text.
@@ -169,6 +177,23 @@ def _build_trade_history_section(trade_history_summary: str) -> str:
         "\n── PRIOR TRADING HISTORY (for reference only — weigh current technicals "
         "and news as the primary basis for your decision) ──\n"
         f"{trade_history_summary}\n"
+    )
+
+
+def _build_analysis_history_section(analysis_history_summary: str) -> str:
+    """Wraps a non-empty analysis-history summary in a clearly-labeled prompt section
+    (2026-08-21, same feature as AITrading/AIShortTrading's own -- see AITrading's
+    CLAUDE_HISTORY.md 2026-08-21 "Analysis History" entry for the full design).
+    Deliberately NOT the "for reference only, weigh current data as primary" framing
+    _build_trade_history_section uses -- this is meant to genuinely inform entry
+    timing. Returns "" when there's no history yet, same as every other optional
+    section here."""
+    if not analysis_history_summary:
+        return ""
+    return (
+        "\n── PRIOR ANALYSIS HISTORY ON THIS ASSET (chronological — judge whether any "
+        "previously-stated watch condition has since been met or invalidated) ──\n"
+        f"{analysis_history_summary}\n"
     )
 
 
@@ -309,7 +334,7 @@ class ResearchEngine:
 
     async def analyze_asset(
         self, ticker: str, asset_name: str, trade_history_summary: str = "",
-        model: str | None = None,
+        model: str | None = None, analysis_history_summary: str = "",
     ) -> ResearchReport:
         """ticker is this project's canonical symbol (e.g. "BTC/USD"); asset_name is the
         plain display/search name (e.g. "Bitcoin"), sourced from the asset universe
@@ -335,6 +360,7 @@ class ResearchEngine:
                 inp["news_summary"], trade_history_summary,
                 inp["long_term_trend_summary"], model,
                 realized_vol_30d=inp.get("realized_vol_30d", 0.0),
+                analysis_history_summary=analysis_history_summary,
             )
         else:
             logger.warning("No ANTHROPIC_API_KEY — generating rule-based report for %s", ticker)
@@ -348,7 +374,9 @@ class ResearchEngine:
                      ticker, report.signal.value, report.conviction_score)
         return report
 
-    async def submit_analysis_batch(self, assets: list[dict]) -> tuple[str | None, dict[str, dict]]:
+    async def submit_analysis_batch(
+        self, assets: list[dict], analysis_history_summaries: dict[str, str] | None = None,
+    ) -> tuple[str | None, dict[str, dict]]:
         """Gathers real inputs for every asset concurrently (capped at 5 at once, same
         throttle AITrading's own submit_analysis_batch uses to avoid hammering
         yfinance/NewsAPI), builds one Batch API request per asset from the identical
@@ -359,7 +387,11 @@ class ResearchEngine:
         to reconstruct each ResearchReport, since the batch response only echoes back
         Claude's own output, not the summaries the prompt was built from. An asset
         whose data-gathering fails is silently excluded -- skipped this cycle, not
-        fatal to the whole batch."""
+        fatal to the whole batch.
+
+        analysis_history_summaries (2026-08-21, optional, keyed by ticker) lets a
+        caller that already pre-fetched per-ticker history pass it through -- see
+        _build_analysis_history_section's own docstring."""
         if not self.client:
             return None, {}
 
@@ -386,12 +418,14 @@ class ResearchEngine:
 
         model = self.config.get("research", {}).get("model_quick_scan", "claude-haiku-4-5")
         market_change_pct = await self.market_data.get_market_change_pct()
+        _history = analysis_history_summaries or {}
         requests = []
         for ticker, inp in inputs_by_ticker.items():
             prompt = self._build_analysis_prompt(
                 ticker, inp["asset_name"], inp["current_price"], inp["technical_summary"],
                 inp["news_summary"], "", inp["long_term_trend_summary"], market_change_pct,
                 realized_vol_30d=inp.get("realized_vol_30d", 0.0),
+                analysis_history_summary=_history.get(ticker, ""),
             )
             requests.append({
                 "custom_id": _ticker_to_custom_id(ticker),
@@ -525,6 +559,7 @@ class ResearchEngine:
         trade_history_summary: str = "", long_term_trend_summary: str = "",
         market_change_pct: float | None = None,
         realized_vol_30d: float = 0.0,
+        analysis_history_summary: str = "",
     ) -> str:
         asset_profile = self.asset_profiles.get(ticker, {}).get("profile")
         tp_cfg = self.config.get("take_profit", {})
@@ -573,6 +608,7 @@ class ResearchEngine:
             asset_profile_section=build_asset_profile_section(asset_profile),
             market_context_section=_build_market_context_section(market_change_pct),
             volatility_section=_build_volatility_section(realized_vol_30d),
+            analysis_history_section=_build_analysis_history_section(analysis_history_summary),
             stop_tp_instructions=stop_tp_instructions,
         )
 
@@ -581,12 +617,14 @@ class ResearchEngine:
         technical_summary: str, news_summary: str,
         trade_history_summary: str = "", long_term_trend_summary: str = "",
         model: str | None = None, realized_vol_30d: float = 0.0,
+        analysis_history_summary: str = "",
     ) -> ResearchReport:
         market_change_pct = await self.market_data.get_market_change_pct()
         prompt = self._build_analysis_prompt(
             ticker, asset_name, current_price, technical_summary, news_summary,
             trade_history_summary, long_term_trend_summary, market_change_pct,
             realized_vol_30d=realized_vol_30d,
+            analysis_history_summary=analysis_history_summary,
         )
         try:
             response_text = await self._call_claude_with_retry(
@@ -665,6 +703,7 @@ class ResearchEngine:
             fair_value_estimate=float(data["fair_value_estimate"]) if data.get("fair_value_estimate") is not None else 0.0,
             margin_of_safety_pct=float(data["margin_of_safety_pct"]) if data.get("margin_of_safety_pct") is not None else 0.0,
             final_trail_pct=final_trail_pct,
+            watch_condition=str(data.get("watch_condition", "") or "").strip(),
         )
 
     def _fallback_report(
