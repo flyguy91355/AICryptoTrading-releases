@@ -44,3 +44,29 @@ def fetch_latest_release(repo: str, http_get=None) -> dict:
         "notes": notes,
         "tarball_url": data["tarball_url"],
     }
+
+
+def fetch_recent_releases(repo: str, limit: int = 15, http_get=None) -> list[dict]:
+    """Fetches the `limit` most recent releases from the given public repo (e.g.
+    'owner/AICryptoTrading-releases') via GitHub's public Releases API's list
+    endpoint — no credential needed, same as fetch_latest_release. Backs the About
+    panel's Version History section (2026-08-20, owner request) — deliberately
+    reuses the exact same release data Apply Update already produces, nothing new
+    to author or maintain. GitHub's list endpoint already returns releases
+    newest-first, so this preserves that order rather than re-sorting. Raises on
+    any HTTP error, same caller-decides-how-to-handle contract as
+    fetch_latest_release."""
+    getter = http_get or requests.get
+    url = f"https://api.github.com/repos/{repo}/releases"
+    response = getter(url, timeout=_DEFAULT_TIMEOUT_SECS, params={"per_page": limit})
+    response.raise_for_status()
+    releases = []
+    for data in response.json():
+        severity, notes = parse_release_notes(data.get("body", ""))
+        releases.append({
+            "tag_name": data["tag_name"],
+            "severity": severity,
+            "notes": notes,
+            "published_at": data.get("published_at"),
+        })
+    return releases

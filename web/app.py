@@ -31,7 +31,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from src.utils.config import load_config, update_settings_yaml
 from src.update.version import read_local_version, write_local_version, is_newer
-from src.update.release_client import fetch_latest_release
+from src.update.release_client import fetch_latest_release, fetch_recent_releases
 from src.update.apply import extract_release_archive, copy_updatable_files, requirements_changed
 from src.research.event_triggers import check_event_triggers, compute_rsi_from_buffer
 from src.data.market_data import MarketDataFetcher, _round_price
@@ -1365,6 +1365,49 @@ async def get_update_status():
         "available": is_newer(current, release["tag_name"]),
         "notes": release["notes"],
         "severity": release["severity"],
+    }
+
+
+_ABOUT_NAME = "Hilton's AICryptoTrading"
+_ABOUT_DESCRIPTION = (
+    "AI-powered research and autonomous trading across a fixed universe of "
+    "~22 major cryptocurrencies, running around the clock with no market-hours "
+    "gating. Each asset gets its own historical character profile -- real "
+    "volatility/breakout/drawdown statistics plus AI-chosen chart periods -- "
+    "feeding every buy decision alongside the same real-time research pipeline "
+    "AITrading uses for stocks."
+)
+
+
+@app.get("/api/about")
+async def get_about():
+    """Backs the About panel (2026-08-20, owner request — "i see no update
+    buttons" led to "maybe i need an about button... so i know what version
+    we are running"). Deliberately reuses fetch_recent_releases against the
+    same releases_repo Apply Update already reads from, rather than
+    authoring/maintaining a separate changelog — the real release notes
+    already exist the moment a release is cut. No caching (unlike
+    /api/update-status above): this is a manual, user-initiated, low-
+    frequency action, not something polled every 60s from an open tab, so
+    the request-volume concern that caching exists for there doesn't apply
+    here. Degrades to an empty release list (never raises) if the releases
+    repo is unreachable, same fail-open philosophy as the update-status
+    endpoint. Same feature, same content shape, as AITrading's own (see that
+    project's CLAUDE_HISTORY.md 2026-08-20 entry) — only the name/description
+    differ."""
+    current = read_local_version(_VERSION_FILE_PATH) or "v0.0.0"
+    repo = state.config.get("update", {}).get("releases_repo", "")
+    releases: list[dict] = []
+    if repo:
+        try:
+            releases = fetch_recent_releases(repo, limit=15)
+        except Exception:
+            pass
+    return {
+        "name": _ABOUT_NAME,
+        "description": _ABOUT_DESCRIPTION,
+        "current_version": current,
+        "releases": releases,
     }
 
 

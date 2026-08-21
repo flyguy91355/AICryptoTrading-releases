@@ -273,6 +273,10 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
     </div>
   </div>
   <div class="header-controls">
+    <div id="aboutButton"
+         style="display:flex;align-items:center;justify-content:center;width:26px;height:26px;background:rgba(6,182,212,0.14);border:1.5px solid var(--cyan);border-radius:50%;font-size:15px;font-weight:700;font-style:italic;cursor:pointer;color:var(--cyan);"
+         onclick="openAboutPanel()"
+         title="About this program">i</div>
     <div id="updateAvailableBadge"
          style="display:none;align-items:center;gap:6px;padding:4px 10px;border:1px solid;border-radius:12px;font-size:12px;cursor:pointer;"
          onclick="openUpdatePanel()"
@@ -1100,6 +1104,63 @@ function renderUpdateBadge() {
   badge.style.display = 'inline-flex';
   badge.style.borderColor = color;
   badge.innerHTML = `<span style="color:${color};">&#9679;</span> Update available: ${_updateStatus.latest}`;
+}
+
+// About panel (2026-08-20, owner request — "i see no update buttons" led to
+// "maybe i need an about button... so i know what version we are running").
+// Fetched fresh on every open (no fetch-once-on-load caching, unlike
+// fetchUpdateStatus above) -- this is a manual, low-frequency click, not
+// something that needs to stay live on an already-open tab, so there's no
+// reason to risk showing a stale version if the page has been open a while.
+async function openAboutPanel() {
+  document.getElementById('amTicker').textContent = 'About';
+  document.getElementById('amName').textContent = '';
+  document.getElementById('amBadges').innerHTML = '';
+  document.getElementById('amLegend').innerHTML = '';
+  document.getElementById('amChart').innerHTML = '';
+  document.getElementById('amChartWrap').style.display = 'none';
+  document.getElementById('amSections').innerHTML =
+    '<div style="padding:12px;color:var(--text-muted);">Loading…</div>';
+  document.getElementById('assetModalOverlay').classList.add('active');
+
+  let data;
+  try {
+    const resp = await fetch('/api/about');
+    data = await resp.json();
+  } catch (e) {
+    document.getElementById('amSections').innerHTML =
+      '<div style="padding:12px;color:var(--text-muted);">Could not load — check your connection and try again.</div>';
+    return;
+  }
+
+  const releaseRows = (data.releases || []).map(r => {
+    const color = r.severity === 'critical' ? 'var(--red)' : 'var(--cyan)';
+    const date = r.published_at ? new Date(r.published_at).toLocaleDateString() : '';
+    return `
+      <div style="padding:10px 0;border-bottom:1px solid var(--border);">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+          <b style="font-size:13px;">${r.tag_name}</b>
+          <span style="color:${color};font-size:11px;text-transform:uppercase;letter-spacing:.03em;">&#9679; ${r.severity}</span>
+          <span style="color:var(--text-muted);font-size:11px;margin-left:auto;">${date}</span>
+        </div>
+        <div style="color:var(--text-muted);font-size:12.5px;white-space:pre-wrap;">${r.notes}</div>
+      </div>`;
+  }).join('');
+
+  const historyHtml = releaseRows
+    ? `<div style="margin-top:18px;">
+         <div style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);margin-bottom:6px;">Version History</div>
+         ${releaseRows}
+       </div>`
+    : '';
+
+  document.getElementById('amSections').innerHTML = `
+    <div style="padding:12px;">
+      <p style="margin:0 0 10px 0;font-size:14px;color:var(--text-muted);">${data.description}</p>
+      <p style="margin:0;">Running: <b>${data.current_version}</b></p>
+      ${historyHtml}
+    </div>
+  `;
 }
 
 function openUpdatePanel() {
