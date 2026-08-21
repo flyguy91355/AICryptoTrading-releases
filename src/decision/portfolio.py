@@ -413,15 +413,30 @@ class Portfolio:
         self, ticker: str, *, exit_shares: float = None, exit_price: float = None,
         reason: str = "",
     ) -> float:
+        """Real, confirmed bug fixed 2026-08-21: this branch's own comment claimed
+        "cash was already credited per-fill in check_take_profits," but neither of
+        this function's two REAL callers with both exit_shares/exit_price set
+        (OrderManager._handle_apparent_close, for a stop-loss/apparent close;
+        OrderManager.execute_sell, for a manual dashboard sell) ever credits cash
+        beforehand -- check_take_profits doesn't even call this function at all; it
+        credits cash and closes the position entirely inline, itself. Every position
+        closed via either real caller silently never had its sale proceeds added to
+        cash. Confirmed live: LINK/USD's final tranche closed via
+        _handle_apparent_close (an unreconciled fill, ~$390.44 in real proceeds) with
+        the PNL correctly recorded in trade_history for display, but the cash itself
+        never credited -- local cash read ~$391 below Alpaca's real cash, the root
+        cause behind a real "-261"-magnitude Day P/L distortion the owner reported
+        twice (see docs/CLAUDE_HISTORY.md's 2026-08-21 entry for the full incident,
+        including the separate, also-real day_start_value/day_start_date bug found
+        alongside this one)."""
         pos = self.positions.get(ticker)
         _exit_shares = exit_shares if exit_shares is not None else (pos.shares if pos else 0)
         _exit_price = exit_price if exit_price is not None else (pos.current_price if pos else 0)
         _trade_id = pos.trade_id if pos else None
         if exit_shares is not None and exit_price is not None:
-            # Cash was already credited per-fill in check_take_profits.
-            # Pop without crediting market_value to avoid double-counting.
             position = self.positions.pop(ticker, None)
             if position:
+                self.cash += _exit_price * _exit_shares
                 self.update_peak()
             pnl = (_exit_price - position.entry_price) * _exit_shares if position else 0
         else:

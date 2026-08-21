@@ -330,9 +330,24 @@ class DashboardState:
         held positions produced zero broadcasts the whole time). Without this, a
         client can't tell "quiet because nothing happened" apart from "silently dead
         connection" -- this periodic heartbeat gives it a fixed, predictable signal
-        to check liveness against instead of guessing from data traffic."""
+        to check liveness against instead of guessing from data traffic.
+
+        Also the day-boundary check for Portfolio.new_trading_day() (2026-08-21, real
+        bug: that method existed but had ZERO callers anywhere in this codebase, so
+        day_start_value/day_start_date were stuck at their init-time values --
+        initial_capital and None respectively -- for the account's entire life. Day
+        P/L was silently computing against day-ONE capital, not today's real morning
+        baseline, ever since inception. Piggybacks on this already-frequent 20s tick
+        rather than a new loop -- cheap string comparison, real work only once a day
+        when the ET calendar date actually changes)."""
         while True:
             await asyncio.sleep(20)
+            today_str = self._now_et().strftime("%Y-%m-%d")
+            if self.portfolio.day_start_date != today_str:
+                self.portfolio.new_trading_day(today_str)
+                await self.portfolio._save_state()
+                logger.info("New trading day: day_start_value reset to $%.2f (%s)",
+                            self.portfolio.day_start_value, today_str)
             await self.broadcast({"type": "heartbeat"})
 
     async def broadcast(self, message: dict):
