@@ -62,6 +62,31 @@ button.save-btn:disabled { opacity: .5; cursor: default; }
 #saveStatus { font-size: 13px; color: var(--text-muted); }
 #saveStatus.ok { color: var(--green); }
 #saveStatus.err { color: var(--red); }
+.risk-tier-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  width: 220px;
+  margin-top: -4px;
+}
+.risk-tier-preview {
+  width: 100%;
+  max-width: 320px;
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+.risk-tier-preview td {
+  padding: 3px 6px;
+}
+.risk-tier-preview td:first-child {
+  color: var(--text-muted);
+}
+.risk-tier-preview td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
 </style>
 </head>
 <body>
@@ -94,8 +119,15 @@ button.save-btn:disabled { opacity: .5; cursor: default; }
 
 <script>
 // Each entry: [section, key, label, type, description, options?]
-// type: "float" | "int" | "bool" | "select"
+// type: "float" | "int" | "bool" | "select" | "range"
 const FIELD_GROUPS = [
+  {
+    title: "Risk Tier",
+    fields: [
+      ["risk_tier", "value", "Risk Tier", "range",
+        "A single dial that scales the conviction gate, R/R gate, stop-loss/take-profit widths, and portfolio circuit breakers together (position size has no flat field here — the AI's own 1-10% judgment gets a scaled ceiling as prompt guidance instead). Moving it and clicking Save overwrites the individual fields below to match — they stay independently editable afterward if you want to hand-tune one specific dial without moving everything else."],
+    ],
+  },
   {
     title: "Trading",
     fields: [
@@ -208,6 +240,24 @@ function renderFields() {
             inputHtml = `<select id="${id}"><option value="true" ${value ? 'selected' : ''}>Enabled</option><option value="false" ${!value ? 'selected' : ''}>Disabled</option></select>`;
           } else if (type === 'select') {
             inputHtml = `<select id="${id}">${options.map(o => `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+          } else if (type === 'range') {
+            inputHtml = `
+              <input type="range" min="0" max="100" step="1" id="${id}" value="${value !== undefined ? value : 50}" oninput="onRiskTierSlide(this.value)">
+              <div class="risk-tier-ticks"><span>Low</span><span>Med</span><span>High</span></div>
+              <div id="riskTierLabel" style="font-size:12.5px;color:var(--text-secondary);margin-top:4px;">Medium (${value !== undefined ? value : 50})</div>
+              <table id="riskTierPreviewTable" class="risk-tier-preview">
+                <tbody>
+                  <tr><td>Conviction gate</td><td id="rtpConviction">--</td></tr>
+                  <tr><td>R/R gate</td><td id="rtpRr">--</td></tr>
+                  <tr><td>Position size ceiling</td><td id="rtpPosition">--</td></tr>
+                  <tr><td>Max loss/trade</td><td id="rtpMaxLoss">--</td></tr>
+                  <tr><td>Stop-loss</td><td id="rtpStop">--</td></tr>
+                  <tr><td>Take-profit ladder</td><td id="rtpTp">--</td></tr>
+                  <tr><td>Cash reserve floor</td><td id="rtpCash">--</td></tr>
+                  <tr><td>Drawdown halt</td><td id="rtpDrawdown">--</td></tr>
+                  <tr><td>Daily loss limit</td><td id="rtpDaily">--</td></tr>
+                </tbody>
+              </table>`;
           } else {
             const step = type === 'int' ? '1' : 'any';
             inputHtml = `<input type="number" step="${step}" id="${id}" value="${value !== undefined ? value : ''}">`;
@@ -222,10 +272,41 @@ function renderFields() {
   `).join('');
 }
 
+let riskTierPreviewTimer = null;
+
+function onRiskTierSlide(value) {
+  clearTimeout(riskTierPreviewTimer);
+  riskTierPreviewTimer = setTimeout(() => fetchRiskTierPreview(value), 150);
+}
+
+async function fetchRiskTierPreview(value) {
+  try {
+    const resp = await fetch(`/api/risk-tier-preview?value=${value}`);
+    if (!resp.ok) return;
+    const p = await resp.json();
+    document.getElementById('riskTierLabel').textContent = `${p.label} (${value})`;
+    document.getElementById('rtpConviction').textContent = p.min_conviction_score.toFixed(1);
+    document.getElementById('rtpRr').textContent = p.min_risk_reward_ratio.toFixed(2) + ':1';
+    document.getElementById('rtpPosition').textContent = p.starting_position_pct.toFixed(1) + '%';
+    document.getElementById('rtpMaxLoss').textContent = p.max_loss_per_trade_pct.toFixed(1) + '%';
+    document.getElementById('rtpStop').textContent = p.stop_loss_pct.toFixed(1) + '%';
+    document.getElementById('rtpTp').textContent =
+      `${p.t1_pct.toFixed(1)}% / ${p.t2_pct.toFixed(1)}% / ${p.t3_pct.toFixed(1)}%`;
+    document.getElementById('rtpCash').textContent = p.min_cash_reserve_pct.toFixed(1) + '%';
+    document.getElementById('rtpDrawdown').textContent = p.drawdown_halt_pct.toFixed(1) + '%';
+    document.getElementById('rtpDaily').textContent = p.daily_loss_limit_pct.toFixed(1) + '%';
+  } catch {
+    // Silent -- display-only preview; a failed fetch just leaves the last-known
+    // preview showing rather than disrupting the rest of the page.
+  }
+}
+
 async function loadSettings() {
   const resp = await fetch('/api/settings');
   currentConfig = await resp.json();
   renderFields();
+  const riskTierValue = (currentConfig.risk_tier || {}).value;
+  if (riskTierValue !== undefined) fetchRiskTierPreview(riskTierValue);
 }
 
 async function saveSettings() {
@@ -235,7 +316,7 @@ async function saveSettings() {
     let value;
     if (type === 'bool') value = el.value === 'true';
     else if (type === 'int') value = parseInt(el.value, 10);
-    else if (type === 'float') value = parseFloat(el.value);
+    else if (type === 'float' || type === 'range') value = parseFloat(el.value);
     else value = el.value;
     updates[`${section}.${key}`] = value;
   }));

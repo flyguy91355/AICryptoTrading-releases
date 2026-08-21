@@ -40,6 +40,12 @@ from src.research.engine import ResearchEngine
 from src.decision.portfolio import Portfolio
 from src.decision.risk_manager import RiskManager
 from src.decision.signal_generator import SignalGenerator, compute_rr, _required_rr
+from src.decision.risk_tier import (
+    apply_risk_tier_to_settings,
+    compute_risk_tier_settings,
+    risk_tier_label,
+    RISK_TIER_DOTKEYS,
+)
 from src.execution.order_manager import OrderManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -1237,6 +1243,7 @@ _SETTINGS_FIELDS: dict[str, type] = {
     "trading.auto_execute": bool,
     "scan.interval_minutes": int,
     "portfolio.max_positions": int,
+    "risk_tier.value": float,
     "risk_management.max_position_pct": float,
     "risk_management.max_loss_per_trade_pct": float,
     "risk_management.min_cash_reserve_pct": float,
@@ -1296,6 +1303,18 @@ async def get_settings():
     return _read_settings_snapshot()
 
 
+@app.get("/api/risk-tier-preview")
+async def risk_tier_preview(value: float):
+    """Read-only -- computes what the real risk-tier factors WOULD become at the
+    given tier value, without saving anything. Ported from AITrading, see its
+    docs/superpowers/specs/2026-08-21-risk-tier-design.md. Includes the
+    starting_position_pct ceiling too (even though it's never written to a config
+    field here) so the Settings-page preview table can show it as guidance."""
+    anchors = state.config.get("risk_tier", {}).get("anchors", {})
+    computed = compute_risk_tier_settings(value, anchors)
+    return {"label": risk_tier_label(value), **computed}
+
+
 @app.post("/api/settings")
 async def save_settings(request: Request):
     body = await request.json()
@@ -1310,6 +1329,14 @@ async def save_settings(request: Request):
 
     if not updates:
         return JSONResponse({"status": "error", "error": "No valid fields in request"}, status_code=400)
+
+    if "risk_tier.value" in updates:
+        _risk_tier_anchors = state.config.get("risk_tier", {}).get("anchors", {})
+        updates = apply_risk_tier_to_settings(updates, _risk_tier_anchors)
+        # Unlike AITrading/AIShortTrading, there's no separate payload/coerced_values
+        # split here -- `updates` is the single dict both persisted to settings.yaml
+        # and applied to state.config below, so no _rm_map-style resync gap exists
+        # for this endpoint specifically.
 
     try:
         update_settings_yaml("config/settings.yaml", updates)

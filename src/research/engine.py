@@ -28,6 +28,7 @@ from src.data.market_data import MarketDataFetcher, format_long_term_trend_summa
 from src.data.news_feed import NewsFeed
 from src.research.asset_profile import build_asset_profile_section
 from src.research.sentiment import SentimentAnalyzer
+from src.decision.risk_tier import build_risk_tier_prompt_section, build_risk_tier_position_note
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ IMPORTANT RULES:
 - If a LONG-TERM TREND section is present below, weigh it explicitly: judge whether the current setup looks like a genuine breakout versus a bounce back toward a level this asset has already failed at before.
 - If a HISTORICAL CHARACTER section is present below, weigh it too: it's a real backtest of THIS asset's own past breakout reliability and drawdown behavior, not generic crypto advice — use it to calibrate how much weight a similar-looking setup deserves for this specific asset, not as a mechanical rule.
 - If a PRIOR ANALYSIS HISTORY section is present below, use it: judge whether any previously-stated watch condition has since been met or invalidated, and let the arc across those past calls inform how you read the current setup — not just today's numbers in isolation.
+- A RISK TIER section states this portfolio's real, current risk posture — weigh it directly when judging conviction and position-sizing guidance, not as a hypothetical.
 
 ASSET: {ticker} — {asset_name}
 CURRENT PRICE: ${current_price}
@@ -146,7 +148,7 @@ CURRENT PRICE: ${current_price}
 
 ── NEWS & SENTIMENT ──
 {news_summary}
-{market_context_section}{volatility_section}{long_term_trend_section}{asset_profile_section}{analysis_history_section}{trade_history_section}
+{market_context_section}{risk_tier_section}{volatility_section}{long_term_trend_section}{asset_profile_section}{analysis_history_section}{trade_history_section}
 Based on all of the above, provide your analysis as JSON with these exact fields:
 {{
     "conviction_score": <1-10, one decimal place, e.g. 7.3>,
@@ -564,6 +566,11 @@ class ResearchEngine:
         asset_profile = self.asset_profiles.get(ticker, {}).get("profile")
         tp_cfg = self.config.get("take_profit", {})
         research_cfg = self.config.get("research", {})
+        risk_tier_value = self.config.get("risk_tier", {}).get("value", 50.0)
+        risk_tier_anchors = self.config.get("risk_tier", {}).get("anchors", {})
+        risk_tier_section = build_risk_tier_prompt_section(risk_tier_value)
+        if risk_tier_anchors:
+            risk_tier_section += build_risk_tier_position_note(risk_tier_value, risk_tier_anchors)
         min_conviction = research_cfg.get("min_conviction_score", 7)
         rr_base = research_cfg.get("min_risk_reward_ratio", 2.0)
         rr_floor = research_cfg.get("rr_floor", 1.5)
@@ -607,6 +614,7 @@ class ResearchEngine:
             long_term_trend_section=_build_long_term_trend_section(long_term_trend_summary),
             asset_profile_section=build_asset_profile_section(asset_profile),
             market_context_section=_build_market_context_section(market_change_pct),
+            risk_tier_section=risk_tier_section,
             volatility_section=_build_volatility_section(realized_vol_30d),
             analysis_history_section=_build_analysis_history_section(analysis_history_summary),
             stop_tp_instructions=stop_tp_instructions,
