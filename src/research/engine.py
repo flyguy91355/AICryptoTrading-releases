@@ -620,6 +620,93 @@ class ResearchEngine:
             stop_tp_instructions=stop_tp_instructions,
         )
 
+    async def recommend_portfolio_health(
+        self, portfolio_summary: dict, positions: list[dict],
+    ) -> dict | None:
+        """One Claude call synthesizing the whole crypto portfolio's mechanical
+        signals plus every held asset's own thesis/fair-value/conviction into a
+        detailed health assessment and a probability-weighted annualized return
+        estimate. Explicitly framed as a judgment call, not a guarantee. Returns
+        None on any failure -- never fabricates a number, same AI Data Integrity
+        principle as every other real trading figure in this codebase. Uses its
+        own model_portfolio_health setting, explicit-click-required only (never
+        automatic, never per-scan)."""
+        if not self.client:
+            return None
+
+        positions_text = "\n".join(
+            f"- {p['ticker']}: conviction {p['conviction']}/10, thesis: {p['thesis']}, "
+            f"fair value ${p['fair_value_estimate']:.2f}, margin of safety "
+            f"{p['margin_of_safety_pct']:.1f}%, unrealized P&L {p['unrealized_pnl_pct']:+.1f}%, "
+            f"held {p['days_held']} day(s)"
+            for p in positions
+        ) or "No open positions currently held."
+
+        sector_text = ", ".join(
+            f"{sector}: {count}" for sector, count in portfolio_summary["sector_counts"].items()
+        ) or "No category data available."
+
+        prompt = f"""Assess the overall health of this crypto trading portfolio and
+predict its likely annualized return. Be direct and specific -- flag real risks and
+real strengths, don't hedge everything into meaninglessness.
+
+IMPORTANT CONTEXT: This is a 100% automated trading system with no discretionary
+human buying -- every purchase happens the moment a candidate clears its own
+conviction/R/R bars via continuous monitoring, not on a schedule and not held back
+for judgment calls. Don't treat the cash % the way you would for a manual trader
+holding dry powder for optionality or emotional comfort -- a large cash balance more
+likely reflects genuine risk discipline (position-sizing limits, cash reserve floor)
+or that too few candidates are currently clearing the bar.
+
+Crypto trades 24/7 with no market-hours concept, and this portfolio draws from a
+small, fixed universe of roughly 22 assets (not a scanned universe of thousands) --
+weigh correlation risk between similar assets (e.g. multiple L1s that tend to move
+together) as a real, distinct concentration risk alongside category concentration.
+
+Conviction score is one of the system's real, hard buy-gate criteria, not just a
+descriptive rating -- an asset is only ever bought if its conviction clears
+{portfolio_summary['min_conviction_score']:.1f}/10 (alongside a separate R/R check).
+Held positions clustering at or just above that threshold is the gate working as
+designed, not evidence the scoring model fails to differentiate.
+
+PORTFOLIO SNAPSHOT:
+Total value: ${portfolio_summary['total_value']:,.2f}
+Cash: {portfolio_summary['cash_pct']:.1f}% of portfolio
+Day P&L: {portfolio_summary['day_pnl_pct']:+.2f}%
+Total P&L since inception: {portfolio_summary['total_pnl_pct']:+.2f}%
+Win rate: {portfolio_summary['win_rate_pct']:.1f}% ({portfolio_summary['closed_count']} closed trades)
+Average conviction of held positions: {portfolio_summary['avg_conviction']:.1f}/10
+Category concentration: {sector_text}
+
+HELD POSITIONS:
+{positions_text}
+
+Respond with ONLY a JSON object in this exact shape:
+{{"health_summary": "<detailed multi-paragraph assessment covering diversification, \
+conviction quality, correlation/concentration risk, and anything that stands out -- \
+several sentences, not a one-liner>", "predicted_annual_return_pct": <signed number>, \
+"prediction_reasoning": "<2-3 sentences explaining the prediction>"}}
+"""
+        model = self.config.get("research", {}).get("model_portfolio_health", "claude-haiku-4-5")
+        try:
+            response_text = await self._call_claude_with_retry(
+                model=model, max_tokens=2000, messages=[{"role": "user", "content": prompt}],
+            )
+            text = response_text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text.rsplit("```", 1)[0]
+            data = json.loads(text)
+            return {
+                "health_summary": data["health_summary"],
+                "predicted_annual_return_pct": float(data["predicted_annual_return_pct"]),
+                "prediction_reasoning": data["prediction_reasoning"],
+            }
+        except Exception as e:
+            logger.warning("recommend_portfolio_health failed: %s", e)
+            return None
+
     async def _claude_analysis(
         self, ticker: str, asset_name: str, current_price: float,
         technical_summary: str, news_summary: str,

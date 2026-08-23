@@ -123,7 +123,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
    fill 2 of 4) hold the brand-mark instead of stretching those two cards to fill the gap,
    same layout AITrading itself uses for the same reason. */
 .stats-row-top { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
-.stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 18px; }
+.stats-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 18px; }
 .stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 13px 15px; }
 .stat-card.clickable { cursor: pointer; }
 .stat-card.clickable:hover { background: var(--bg-card-hover); }
@@ -320,6 +320,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
         <div class="brand-mark-word">Hilton's AI Crypto Trading</div>
         <div class="brand-mark-tag">AI-Powered Crypto Research &amp; Automatic Trading</div>
         <div class="brand-mark-by">by <span class="brand-mark-hilton">Hilton Group</span></div>
+        <div class="clickable" style="font-size:12px;color:var(--text-secondary);margin-top:8px;cursor:pointer;" onclick="openPortfolioSummaryPopup()">Portfolio Summary →</div>
       </div>
     </div>
   </div>
@@ -329,6 +330,7 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
     <div class="stat-card clickable" onclick="openPerfPopup('month')"><div class="stat-label">Month P/L</div><div class="stat-value" id="monthPnl">—</div><div class="stat-sub" id="monthPnlPct"></div></div>
     <div class="stat-card clickable" onclick="openPerfPopup('ytd')"><div class="stat-label">YTD P/L</div><div class="stat-value" id="ytdPnl">—</div><div class="stat-sub" id="ytdPnlPct"></div></div>
     <div class="stat-card clickable" onclick="openPerfPopup('total')"><div class="stat-label">Total P/L</div><div class="stat-value" id="totalPnl">—</div><div class="stat-sub" id="totalPnlPct"></div></div>
+    <div class="stat-card clickable" onclick="openWinRatePopup()"><div class="stat-label">Win Rate</div><div class="stat-value" id="winRatePct">—</div><div class="stat-sub" id="winRateSub"></div></div>
   </div>
 
   <div class="main-layout">
@@ -708,6 +710,7 @@ async function showAssetModal(ticker) {
       sections.push('<div class="asset-modal-section"><div class="asset-modal-section-body">No research report cached for this position yet.</div></div>');
     }
     document.getElementById('amSections').innerHTML = sections.join('');
+    appendAnalysisHistorySection(ticker);
   } catch (e) {
     console.error('showAssetModal setup:', ticker, e);
   }
@@ -724,6 +727,37 @@ async function showAssetModal(ticker) {
       { entry, entryTime, stop, takeProfits, fairValue }, data.sma_fast, data.sma_slow);
   } catch (e) {
     console.error('showAssetModal chart fetch:', ticker, e);
+  }
+}
+
+async function appendAnalysisHistorySection(ticker) {
+  const container = document.getElementById('amSections');
+  const slotId = `analysisHistorySlot-${ticker.replace('/', '-')}`;
+  container.insertAdjacentHTML('beforeend',
+    `<div class="asset-modal-section" id="${slotId}">
+      <div class="asset-modal-section-title">Analysis History</div>
+      <div class="asset-modal-section-body" style="opacity:0.6;">Loading…</div>
+    </div>`);
+  try {
+    const resp = await fetch(`/api/analysis-history/${encodeURIComponent(ticker)}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const slot = document.getElementById(slotId);
+    if (!slot) return;  // modal closed/reopened for a different ticker before this resolved
+    if (!data.rows.length) {
+      slot.querySelector('.asset-modal-section-body').textContent = 'No prior analyses recorded yet.';
+      return;
+    }
+    const lines = data.rows.map(r => {
+      const date = (r.generated_at || '').slice(0, 10);
+      const fv = r.fair_value_estimate ? `$${r.fair_value_estimate.toFixed(2)}` : 'n/a';
+      const watch = r.watch_condition ? `watch: ${r.watch_condition}` : 'no watch condition stated';
+      return `<div style="padding:4px 0;border-bottom:1px solid var(--border);">${date} — ${r.signal}, conviction ${r.conviction_score.toFixed(1)}/10, fair value ${fv} — ${watch}</div>`;
+    }).join('');
+    slot.querySelector('.asset-modal-section-body').innerHTML = lines;
+  } catch (e) {
+    const slot = document.getElementById(slotId);
+    if (slot) slot.querySelector('.asset-modal-section-body').textContent = 'Failed to load.';
   }
 }
 
@@ -1309,6 +1343,127 @@ async function fetchPerfTiles() {
   } catch (e) { console.error('fetchPerfTiles:', e); }
 }
 fetchPerfTiles();
+
+async function fetchWinRate() {
+  try {
+    const resp = await fetch('/api/win-loss-trades');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    document.getElementById('winRatePct').textContent = data.closed_count
+      ? `${data.win_rate_pct.toFixed(1)}%` : '—';
+    document.getElementById('winRateSub').textContent = `${data.closed_count} closed`;
+  } catch { /* leave tile blank on error, same as fetchPerfTiles */ }
+}
+fetchWinRate();
+
+async function openWinRatePopup() {
+  document.getElementById('amTicker').textContent = 'Win/Loss Record';
+  document.getElementById('amName').textContent = '';
+  document.getElementById('amBadges').innerHTML = '';
+  document.getElementById('amLegend').innerHTML = '';
+  document.getElementById('amChart').innerHTML = '';
+  document.getElementById('amChartWrap').style.display = 'none';
+
+  const sections = document.getElementById('amSections');
+  sections.innerHTML = '<div style="opacity:0.6;">Loading…</div>';
+  document.getElementById('assetModalOverlay').classList.add('active');
+
+  try {
+    const resp = await fetch('/api/win-loss-trades');
+    const data = await resp.json();
+    if (!data.trades.length) {
+      sections.innerHTML = '<div class="asset-modal-section-body">No closed trades yet.</div>';
+      return;
+    }
+    const rows = data.trades.map(t => {
+      const color = t.is_win ? 'var(--green, #22c55e)' : 'var(--red, #ef4444)';
+      const sign = t.total_pnl >= 0 ? '+' : '';
+      return `<div class="pl-row"><span>${t.ticker}</span><span style="color:${color};">${sign}$${t.total_pnl.toFixed(2)}</span></div>`;
+    }).join('');
+    sections.innerHTML =
+      `<div style="margin-bottom:12px;">${data.win_rate_pct.toFixed(1)}% win rate — ${data.closed_count} closed trades</div>` +
+      `<div class="pl-list">${rows}</div>`;
+  } catch (e) {
+    sections.innerHTML = '<div class="asset-modal-section-body">Failed to load.</div>';
+  }
+}
+
+async function openPortfolioSummaryPopup() {
+  document.getElementById('amTicker').textContent = 'Portfolio Summary';
+  document.getElementById('amName').textContent = '';
+  document.getElementById('amBadges').innerHTML = '';
+  document.getElementById('amLegend').innerHTML = '';
+  document.getElementById('amChart').innerHTML = '';
+  // No chart here (unlike openPerfPopup('total')) -- the equity list below already
+  // conveys the same history; showing amChartWrap with nothing rendered into it
+  // left a large empty box (caught via screenshot verification before shipping).
+  document.getElementById('amChartWrap').style.display = 'none';
+
+  const sections = document.getElementById('amSections');
+  sections.innerHTML = '<div style="opacity:0.6;">Loading…</div>';
+  document.getElementById('assetModalOverlay').classList.add('active');
+
+  let summary;
+  try {
+    summary = await (await fetch('/api/portfolio-summary')).json();
+  } catch {
+    sections.innerHTML = '<div class="asset-modal-section-body">Failed to load.</div>';
+    return;
+  }
+
+  const listHtml = _buildPerfList(_perfPoints, null);
+  sections.innerHTML = `
+    <div style="display:flex;gap:24px;margin-bottom:16px;">
+      <div><b>Buys:</b> ${summary.buy_count} — $${summary.buy_value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+      <div><b>Sells:</b> ${summary.sell_count} — $${summary.sell_value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+    </div>
+    <div class="pl-list">${listHtml}</div>
+    <div id="portfolioHealthSection" style="margin-top:20px;"></div>
+  `;
+  renderPortfolioHealthPrompt();
+}
+
+async function renderPortfolioHealthPrompt() {
+  const el = document.getElementById('portfolioHealthSection');
+  if (!el) return;
+  let modelInfo;
+  try {
+    modelInfo = await (await fetch('/api/portfolio-health-model')).json();
+  } catch {
+    modelInfo = { model: 'claude-haiku-4-5' };
+  }
+  el.innerHTML = `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px;">
+      <div style="margin-bottom:8px;">Run an AI health assessment using <b>${modelInfo.model}</b>?</div>
+      <button onclick="runPortfolioHealth(false)" style="padding:6px 14px;cursor:pointer;">Run AI Health Assessment</button>
+    </div>
+  `;
+}
+
+async function runPortfolioHealth(force) {
+  const el = document.getElementById('portfolioHealthSection');
+  el.innerHTML = '<div style="opacity:0.6;">Assessing…</div>';
+  let result;
+  try {
+    result = await (await fetch(`/api/portfolio-health?force=${force}`)).json();
+  } catch {
+    el.innerHTML = '<div>Assessment failed.</div>';
+    return;
+  }
+  if (result.is_fallback) {
+    el.innerHTML = '<div>Assessment unavailable right now.</div>';
+    return;
+  }
+  const sign = result.predicted_annual_return_pct >= 0 ? '+' : '';
+  el.innerHTML = `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px;">
+      <div style="margin-bottom:10px;">${result.health_summary}</div>
+      <div style="font-weight:600;">Predicted annual return: ${sign}${result.predicted_annual_return_pct.toFixed(1)}%</div>
+      <div style="color:var(--text-secondary);font-size:13px;margin-top:4px;">${result.prediction_reasoning}</div>
+      <button onclick="runPortfolioHealth(true)" style="margin-top:10px;padding:6px 14px;cursor:pointer;">Refresh Assessment</button>
+    </div>
+  `;
+}
 setInterval(fetchPerfTiles, 60000);
 
 function openPerfPopup(bucket) {

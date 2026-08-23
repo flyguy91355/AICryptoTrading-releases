@@ -130,6 +130,32 @@ def _apply_live_quotes_to_reports(reports: dict, quotes: dict) -> None:
             reports[ticker]["current_price"] = price
 
 
+def _group_closed_trades(rows: list[tuple]) -> list[dict]:
+    """Groups raw trade_history SELL rows into one logical trade per real buy --
+    a position's T1/T2/final tranches count as one combined-outcome trade, not
+    three separate wins/losses. rows: (trade_id, ticker, pnl) tuples. A None
+    trade_id (shouldn't occur here -- trade_id has been populated since this
+    program's inception, unlike AITrading's own pre-migration legacy rows) is
+    still handled defensively as its own standalone trade. Returns one dict per
+    closed trade: {trade_id, ticker, total_pnl, is_win}."""
+    grouped: dict[str, dict] = {}
+    trades: list[dict] = []
+    for trade_id, ticker, pnl in rows:
+        if trade_id is None:
+            if pnl is not None:
+                trades.append({"trade_id": None, "ticker": ticker,
+                                "total_pnl": pnl, "is_win": pnl > 0})
+            continue
+        if trade_id not in grouped:
+            grouped[trade_id] = {"trade_id": trade_id, "ticker": ticker, "total_pnl": 0.0}
+        if pnl is not None:
+            grouped[trade_id]["total_pnl"] += pnl
+    for trade in grouped.values():
+        trade["is_win"] = trade["total_pnl"] > 0
+        trades.append(trade)
+    return trades
+
+
 class DashboardState:
     def __init__(self):
         self.config = load_config()
@@ -1369,6 +1395,128 @@ async def recent_sells():
     return {"sells": await state.portfolio.get_recent_sells()}
 
 
+@app.get("/api/win-loss-trades")
+async def get_win_loss_trades():
+    """Win/loss record, grouped by trade_id so a position's T1/T2/final tranches
+    count as one combined-outcome trade -- see _group_closed_trades. Direct
+    query, no cache (this program's trade volume is small enough that caching
+    isn't needed the way AITrading's larger universe requires)."""
+    if not state.portfolio._db:
+        return {"trades": [], "win_rate_pct": 0.0, "closed_count": 0}
+    async with state.portfolio._db.execute(
+        "SELECT trade_id, ticker, pnl FROM trade_history "
+        "WHERE action = 'SELL' ORDER BY timestamp DESC"
+    ) as cur:
+        rows = await cur.fetchall()
+    trades = _group_closed_trades(rows)
+    closed = len(trades)
+    wins = sum(1 for t in trades if t["is_win"])
+    return {
+        "trades": trades,
+        "win_rate_pct": round(wins / closed * 100, 1) if closed else 0.0,
+        "closed_count": closed,
+    }
+
+
+@app.get("/api/portfolio-summary")
+async def get_portfolio_summary():
+    """Buy/sell activity totals for the Portfolio Summary popup -- shares/units *
+    price at each fill, summed by action. No date filtering: this program has no
+    pre-migration legacy-data window to exclude (unlike AITrading's JSONL-vs-SQL
+    split), trade_history is the single real record since inception."""
+    if not state.portfolio._db:
+        return {"buy_count": 0, "buy_value": 0.0, "sell_count": 0, "sell_value": 0.0}
+    result = {"buy_count": 0, "buy_value": 0.0, "sell_count": 0, "sell_value": 0.0}
+    for action, count_key, value_key in (("BUY", "buy_count", "buy_value"), ("SELL", "sell_count", "sell_value")):
+        async with state.portfolio._db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(shares * price), 0) FROM trade_history WHERE action = ?",
+            (action,),
+        ) as cur:
+            count, value = await cur.fetchone()
+        result[count_key] = count
+        result[value_key] = round(value, 2)
+    return result
+
+
+@app.get("/api/portfolio-health-model")
+async def get_portfolio_health_model():
+    """Zero-cost, no-Claude-call lookup of which model a Portfolio Health
+    Assessment run would currently use -- lets the frontend show a confirmation
+    prompt with the real model name before spending a real Claude call."""
+    model = state.config.get("research", {}).get("model_portfolio_health", "claude-haiku-4-5")
+    return {"model": model}
+
+
+@app.get("/api/portfolio-health")
+async def get_portfolio_health(force: bool = False):
+    """Explicit-click-required (never automatic, never per-scan). Cached for the
+    rest of the same day once generated -- force=true (the "Refresh Assessment"
+    button) always bypasses this."""
+    cache = getattr(state, "_portfolio_health_cache", {})
+    now = state._now_et()
+    if not force and cache.get("generated_at"):
+        cached_dt = datetime.fromisoformat(cache["generated_at"])
+        if cached_dt.date() == now.date():
+            return cache
+
+    if state.portfolio._db:
+        async with state.portfolio._db.execute(
+            "SELECT trade_id, ticker, pnl FROM trade_history WHERE action = 'SELL' "
+            "ORDER BY timestamp DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+    else:
+        rows = []
+    trades = _group_closed_trades(rows)
+    closed = len(trades)
+    wins = sum(1 for t in trades if t["is_win"])
+    win_rate_pct = round(wins / closed * 100, 1) if closed else 0.0
+
+    sector_counts: dict[str, int] = {}
+    conviction_values = []
+    positions_payload = []
+    for ticker, pos in state.portfolio.positions.items():
+        sector = pos.sector or "Unknown"
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        report = state.latest_reports.get(ticker, {})
+        conviction = report.get("conviction_score", 0) or 0
+        if conviction:
+            conviction_values.append(conviction)
+        days_held = (now.date() - pos.opened_at.date()).days if pos.opened_at else 0
+        positions_payload.append({
+            "ticker": ticker,
+            "thesis": report.get("thesis", ""),
+            "fair_value_estimate": report.get("fair_value_estimate", 0.0) or 0.0,
+            "margin_of_safety_pct": report.get("margin_of_safety_pct", 0.0) or 0.0,
+            "conviction": conviction,
+            "unrealized_pnl_pct": pos.unrealized_pnl_pct,
+            "days_held": days_held,
+        })
+    avg_conviction = sum(conviction_values) / len(conviction_values) if conviction_values else 0.0
+
+    portfolio_summary = {
+        "total_value": state.portfolio.total_value,
+        "cash_pct": (state.portfolio.cash / state.portfolio.total_value * 100)
+            if state.portfolio.total_value else 0.0,
+        "day_pnl_pct": state.portfolio.day_pnl_pct,
+        "total_pnl_pct": (state.portfolio.total_pnl / state.portfolio.initial_capital * 100)
+            if state.portfolio.initial_capital else 0.0,
+        "win_rate_pct": win_rate_pct,
+        "closed_count": closed,
+        "avg_conviction": avg_conviction,
+        "sector_counts": sector_counts,
+        "min_conviction_score": state.config.get("research", {}).get("min_conviction_score", 5.2),
+    }
+
+    result = await state.research_engine.recommend_portfolio_health(portfolio_summary, positions_payload)
+    if result is None:
+        return {"is_fallback": True}
+    result["is_fallback"] = False
+    result["generated_at"] = now.isoformat()
+    state._portfolio_health_cache = result
+    return result
+
+
 @app.get("/api/sell-analysis/{trade_id}")
 async def get_sell_analysis(trade_id: str):
     """Backs the Recent Sells trade-detail popup's post-mortem section (2026-08-21,
@@ -1459,6 +1607,31 @@ async def asset_history(ticker: str, period: str = "1mo"):
             "support_level": technicals.support_level,
             "resistance_level": technicals.resistance_level,
         },
+    }
+
+
+@app.get("/api/analysis-history/{ticker:path}")
+async def analysis_history(ticker: str):
+    """Every past analysis for one asset -- data the prompt-feed-forward feature
+    already collects (analysis_history table) but nothing has ever displayed to
+    a human. Most-recent-first, matching Recent Sells' own convention."""
+    if not state.portfolio._db:
+        return {"rows": []}
+    async with state.portfolio._db.execute(
+        "SELECT generated_at, conviction_score, signal, entry_price, "
+        "fair_value_estimate, watch_condition FROM analysis_history "
+        "WHERE ticker = ? ORDER BY generated_at DESC",
+        (ticker,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return {
+        "rows": [
+            {
+                "generated_at": r[0], "conviction_score": r[1], "signal": r[2],
+                "entry_price": r[3], "fair_value_estimate": r[4], "watch_condition": r[5],
+            }
+            for r in rows
+        ]
     }
 
 
