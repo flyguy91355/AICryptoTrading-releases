@@ -496,21 +496,38 @@ class OrderManager:
                 await self._handle_apparent_close(ticker)
         self.portfolio.update_peak()
 
-    async def _handle_apparent_close(self, ticker: str):
-        """Alpaca no longer shows this position -- almost always the resting stop
-        firing. Verifies via a real closed-order lookup before recording anything,
-        rather than guessing a price (same AI-Data-Integrity-adjacent principle
-        AITrading's own fabricated-fill audit established: never invent a fill)."""
-        pos = self.portfolio.positions.get(ticker)
-        if pos is None:
-            return
+    async def _find_real_sell(self, ticker: str) -> dict | None:
+        """One real closed-order lookup for ticker, returning the matching real sell
+        (or None). Broken out of _handle_apparent_close so it can be called twice --
+        once immediately, once after a short pause -- without duplicating the
+        try/except."""
         try:
             closed = await self.broker.get_closed_orders(symbols=[ticker], limit=20)
         except Exception as e:
             logger.warning("_handle_apparent_close: closed-order lookup failed for %s: %s", ticker, e)
             closed = []
+        return next((o for o in closed if o["side"] == "sell" and o["filled_qty"] > 0), None)
 
-        real_sell = next((o for o in closed if o["side"] == "sell" and o["filled_qty"] > 0), None)
+    async def _handle_apparent_close(self, ticker: str):
+        """Alpaca no longer shows this position -- almost always the resting stop
+        firing. Verifies via a real closed-order lookup before recording anything,
+        rather than guessing a price (same AI-Data-Integrity-adjacent principle
+        AITrading's own fabricated-fill audit established: never invent a fill).
+
+        Retries the lookup once, after a short pause, before falling back to the
+        unreconciled path (2026-08-23, BTC/USD incident) -- Alpaca's closed-orders
+        endpoint can lag a just-filled order's own filled_at by a few seconds (the
+        real order here filled at 05:17:39.792265 UTC; this check ran 5 seconds
+        later, at 05:17:44, and still came back empty on a single lookup). Mirrors
+        AITrading's own proven fix for the identical race."""
+        pos = self.portfolio.positions.get(ticker)
+        if pos is None:
+            return
+        real_sell = await self._find_real_sell(ticker)
+        if real_sell is None:
+            await asyncio.sleep(2.0)
+            real_sell = await self._find_real_sell(ticker)
+
         if real_sell and real_sell["filled_avg_price"]:
             fill_price = real_sell["filled_avg_price"]
             fill_qty = real_sell["filled_qty"]
