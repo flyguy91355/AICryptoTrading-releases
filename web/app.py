@@ -1341,17 +1341,51 @@ async def risk_tier_preview(value: float):
     return {"label": risk_tier_label(value), **computed}
 
 
+def _coerce_settings_updates(body: dict, fields: dict) -> tuple[dict, str | None]:
+    """Validates/coerces every _SETTINGS_FIELDS-covered key in a /api/settings
+    payload. Returns (updates, error_detail) -- error_detail is None on success, or a
+    human-readable string naming the first genuinely malformed field on failure (the
+    caller then returns updates={} to the client, same all-or-nothing contract as
+    before for a REAL mistake). Extracted as its own pure function (2026-08-25) so
+    it's directly testable via this project's own AST-extraction technique --
+    web/app.py can't be imported directly (real DashboardState() at import time).
+
+    A blank field is skipped rather than treated as a fatal error (ported from
+    AITrading's own real live incident, same day). The 2026-08-20 fix to
+    sma_fast_period/sma_slow_period (see their own nullable coercers above) patched
+    this exact failure mode for those 2 specific fields, but the root cause is
+    general: ANY entry in _SETTINGS_FIELDS with a bare int/float coercer is blank on
+    an install whose config/settings.yaml hasn't picked up that key yet (that file is
+    deliberately never touched by the normal deploy path), and the save loop was
+    still wrapped in one try/except that aborted the WHOLE payload on the first field
+    that failed -- adding any future numeric setting reintroduces the identical class
+    of bug for a different field. A blank ("") value is now skipped (absent from the
+    returned updates dict, so the caller leaves whatever config already has for it
+    untouched) instead of raising; a genuinely malformed non-blank value still fails
+    the whole payload exactly as before."""
+    updates: dict = {}
+    for dotted, raw_value in body.items():
+        if dotted not in fields:
+            continue  # ignore unknown/unexpected fields rather than failing the whole save
+        try:
+            updates[dotted] = fields[dotted](raw_value)
+        except (TypeError, ValueError) as e:
+            if raw_value == "":
+                logger.warning(
+                    "save_settings: skipping blank field %s "
+                    "(config/settings.yaml likely missing this key on this install)",
+                    dotted)
+                continue
+            return {}, f"Invalid value for {dotted}: {e}"
+    return updates, None
+
+
 @app.post("/api/settings")
 async def save_settings(request: Request):
     body = await request.json()
-    updates: dict = {}
-    try:
-        for dotted, raw_value in body.items():
-            if dotted not in _SETTINGS_FIELDS:
-                continue  # ignore unknown/unexpected fields rather than failing the whole save
-            updates[dotted] = _SETTINGS_FIELDS[dotted](raw_value)
-    except (TypeError, ValueError) as e:
-        return JSONResponse({"status": "error", "error": f"Invalid value: {e}"}, status_code=400)
+    updates, error_detail = _coerce_settings_updates(body, _SETTINGS_FIELDS)
+    if error_detail is not None:
+        return JSONResponse({"status": "error", "error": error_detail}, status_code=400)
 
     if not updates:
         return JSONResponse({"status": "error", "error": "No valid fields in request"}, status_code=400)
