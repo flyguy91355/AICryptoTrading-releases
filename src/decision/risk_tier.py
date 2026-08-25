@@ -38,7 +38,7 @@ def compute_risk_tier_settings(tier_value: float, anchors: dict) -> dict:
     )
     stop_loss_multiplier = stop_loss_pct / anchors["stop_loss_pct"]
 
-    return {
+    result = {
         "min_conviction_score": _interp(
             t, anchors["min_conviction_score"] + 1.5, anchors["min_conviction_score"],
             conviction_high,
@@ -72,6 +72,24 @@ def compute_risk_tier_settings(tier_value: float, anchors: dict) -> dict:
             anchors["daily_loss_limit_pct"] * 1.6,
         ),
     }
+    # Rounded before returning (fixed 2026-08-25, owner report: a live t1_pct/t2_pct/
+    # t3_pct in config/settings.yaml showed ~15 digits after the decimal, e.g.
+    # 11.840000000000002) -- every one of these values is either an _interp() result
+    # or a chain of division-then-multiplication (stop_loss_multiplier = stop_loss_pct
+    # / anchors["stop_loss_pct"], then anchors["tN_pct"] * stop_loss_multiplier), both
+    # classic sources of IEEE-754 residue. Nothing downstream needs more precision than
+    # what's already shown everywhere these values are displayed (Settings page
+    # inputs, the risk-tier preview table's own .toFixed(1)/.toFixed(2) formatting) --
+    # min_risk_reward_ratio rounds to 2 decimals (matches its own .toFixed(2) display
+    # as an R/R ratio, e.g. "2.10:1"); every other field is a plain percentage,
+    # rounded to 1 decimal (matches their .toFixed(1) display). Rounding here, once,
+    # means every caller (the live apply-to-settings path, the read-only preview
+    # endpoint, and whatever ends up written to config/settings.yaml) gets a clean
+    # value for free, instead of each needing its own defensive rounding. Ported to
+    # AITrading/AIShortTrading the same day.
+    for key in result:
+        result[key] = round(result[key], 2 if key == "min_risk_reward_ratio" else 1)
+    return result
 
 
 def risk_tier_label(tier_value: float) -> str:
