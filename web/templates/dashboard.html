@@ -284,6 +284,10 @@ main { padding: 18px 22px; max-width: 1600px; margin: 0 auto; }
          onclick="openUpdatePanel()"
          title="Click for details">
     </div>
+    <div id="aiCostBadge"
+         style="display:none;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--border);border-radius:12px;font-size:12px;color:var(--text-muted);"
+         title="Estimated real Claude API spend today (list-price token math, not Anthropic's actual billing figure)">
+    </div>
     <button id="pauseBtn" onclick="onPauseBtnClick()">⏸ Pause</button>
     <a class="settings-link" href="/settings">⚙ Settings</a>
     <span id="paperBadge" class="badge">PAPER</span>
@@ -1189,6 +1193,28 @@ function renderUpdateBadge() {
   badge.style.borderColor = color;
   badge.innerHTML = `<span style="color:${color};">&#9679;</span> Update available: ${_updateStatus.latest}`;
 }
+
+// Live AI-cost widget (2026-08-26, owner request, ported from AITrading the
+// same day after a real $18/day cost shock: "also dont forget the visual ai
+// cost on each server... add a estimate daily amount too"). /api/ai-cost-today
+// is a cheap, zero-network-call read of already-tracked in-memory state (see
+// ai_cost_tracker.py), so polling every 60s alongside the other header/tile
+// refreshes is fine.
+async function fetchAiCostToday() {
+  try {
+    const resp = await fetch('/api/ai-cost-today');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const badge = document.getElementById('aiCostBadge');
+    if (!badge) return;
+    const cost = (data.estimated_cost_usd || 0).toFixed(2);
+    const calls = data.calls || 0;
+    badge.style.display = 'inline-flex';
+    badge.textContent = `AI today: ${calls} call${calls === 1 ? '' : 's'} · ~$${cost}`;
+  } catch (e) { /* no badge shown on any fetch error */ }
+}
+fetchAiCostToday();
+setInterval(fetchAiCostToday, 60000);
 
 // About panel (2026-08-20, owner request — "i see no update buttons" led to
 // "maybe i need an about button... so i know what version we are running").

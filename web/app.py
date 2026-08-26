@@ -1825,6 +1825,24 @@ async def get_about():
     }
 
 
+@app.get("/api/ai-cost-today")
+async def get_ai_cost_today():
+    """Backs the dashboard's live AI-cost widget (2026-08-26, owner request,
+    ported from AITrading/AIShortTrading the same day — see AITrading's
+    CLAUDE_HISTORY.md 2026-08-26 entry for the $18/day cost-shock incident
+    that prompted it; crypto's own share of that day's total was confirmed
+    small at the time, but this widget applies going forward regardless).
+    Reads state.research_engine.cost_tracker's own already-running in-memory
+    summary — every real Claude call anywhere in this process (the sequential/
+    direct path via a transparent client wrapper, the Batch API path via
+    fetch_batch_results' own explicit recording) is already tracked as it
+    happens, so this endpoint is a cheap, zero-network-call read, safe to poll
+    frequently. See src/research/ai_cost_tracker.py's own module docstring for
+    the pricing basis and its "this is an ESTIMATE, not real billing" caveat."""
+    model = state.config.get("research", {}).get("model_quick_scan", "claude-haiku-4-5")
+    return state.research_engine.cost_tracker.summary(model_for_estimate=model)
+
+
 _perf_history_cache: list[dict] | None = None
 _perf_history_cache_time: datetime | None = None
 
