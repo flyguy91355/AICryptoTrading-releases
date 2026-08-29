@@ -1908,6 +1908,18 @@ async def get_ai_cost_today():
     return state.research_engine.cost_tracker.summary(model_for_estimate=model)
 
 
+@app.get("/api/ai-cost-history")
+async def get_ai_cost_history():
+    """Backs the AI-cost badge's day-by-day history popup (2026-08-29, ported
+    from AIShortTrading's own 2026-08-27 addition — see that project's
+    CLAUDE_HISTORY.md entry). Every already-settled day's totals plus an
+    estimated dollar cost, most-recent-first — today itself is never included
+    here (it hasn't settled yet), see get_ai_cost_today for that. Cheap,
+    zero-network-call read of AICostTracker's own already-persisted history."""
+    model = state.config.get("research", {}).get("model_quick_scan", "claude-haiku-4-5")
+    return {"days": state.research_engine.cost_tracker.history(model_for_estimate=model)}
+
+
 _perf_history_cache: list[dict] | None = None
 _perf_history_cache_time: datetime | None = None
 

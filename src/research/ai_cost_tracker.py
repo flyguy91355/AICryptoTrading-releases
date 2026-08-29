@@ -49,13 +49,24 @@ class AICostTracker:
     """In-memory running total for TODAY (real calendar day in the configured
     timezone), persisted to a small JSON file so a restart mid-day doesn't reset
     the visible count to zero -- same "small cache file next to the DB"
-    precedent this codebase already uses for report/on-deck caches. Deliberately
-    does NOT retain historical days beyond today -- this is a live "how much have
-    we spent so far today" gauge, not a billing ledger."""
+    precedent this codebase already uses for report/on-deck caches.
+
+    Also maintains a separate, append-only per-day history file (2026-08-27,
+    owner request: "click AI-cost badge -> day-by-day cost history popup") --
+    each day's totals are settled into it the moment that day ends (a real
+    rollover while running, or a stale cached day discovered at startup after a
+    restart landed on a new day before rollover ever fired). `summary()` remains
+    the live, still-accumulating view of TODAY only; `history()` is every
+    already-settled day, most-recent-first. No retention cap, matching this
+    codebase's own precedent for Day/Week P/L history (`_daily_pnl_buckets`/
+    `_weekly_pnl_buckets`): "reads the full, unfiltered list with no recency
+    window." """
 
     def __init__(self, cache_path: str = "data/ai_cost_today.json",
+                 history_path: str = "data/ai_cost_history.json",
                  tz: str = "America/New_York"):
         self._cache_path = Path(cache_path)
+        self._history_path = Path(history_path)
         self._tz = ZoneInfo(tz)
         self._date_str = ""
         self._calls = 0
@@ -72,6 +83,10 @@ class AICostTracker:
     def _roll_if_new_day(self) -> None:
         today = self._today_str()
         if today != self._date_str:
+            self._append_history_row(
+                self._date_str, self._calls, self._input_tokens, self._output_tokens,
+                self._batch_calls, self._batch_input_tokens, self._batch_output_tokens,
+            )
             self._date_str = today
             self._calls = 0
             self._input_tokens = 0
@@ -79,6 +94,71 @@ class AICostTracker:
             self._batch_calls = 0
             self._batch_input_tokens = 0
             self._batch_output_tokens = 0
+
+    def _append_history_row(self, date_str: str, calls: int, input_tokens: int,
+                             output_tokens: int, batch_calls: int,
+                             batch_input_tokens: int, batch_output_tokens: int) -> None:
+        """Settles one finished day's raw totals into the history file. Raw
+        token/call counts are stored, not a precomputed dollar estimate, so a
+        later pricing correction in PRICING_PER_MILLION naturally applies to
+        historical rows too when re-read via history() -- never re-derived from
+        stale $ figures. Upserts by date (removes any existing row for the same
+        date before appending) as an idempotency guard against a rare
+        double-finalize race (e.g. two near-simultaneous restarts both finding
+        the same stale cached day); skips entirely if nothing real happened that
+        day, matching this codebase's own precedent of not padding a P/L history
+        list with empty non-trading days."""
+        if calls == 0 and batch_calls == 0:
+            return
+        try:
+            rows = []
+            if self._history_path.exists():
+                rows = json.loads(self._history_path.read_text(encoding="utf-8"))
+            rows = [r for r in rows if r.get("date") != date_str]
+            rows.append({
+                "date": date_str, "calls": calls, "input_tokens": input_tokens,
+                "output_tokens": output_tokens, "batch_calls": batch_calls,
+                "batch_input_tokens": batch_input_tokens,
+                "batch_output_tokens": batch_output_tokens,
+            })
+            rows.sort(key=lambda r: r["date"])
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            self._history_path.write_text(json.dumps(rows), encoding="utf-8")
+        except Exception as e:
+            logger.debug("AICostTracker._append_history_row failed (non-fatal): %s", e)
+
+    def history(self, model_for_estimate: str = "claude-haiku-4-5") -> list[dict]:
+        """Every already-settled day's totals plus an estimated dollar cost,
+        most-recent-first. Today itself is never included here (it hasn't
+        settled yet) -- summary() is the live view for today."""
+        try:
+            if not self._history_path.exists():
+                return []
+            rows = json.loads(self._history_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.debug("AICostTracker.history failed (non-fatal): %s", e)
+            return []
+        result = []
+        for r in rows:
+            input_tokens = r.get("input_tokens", 0)
+            output_tokens = r.get("output_tokens", 0)
+            batch_input_tokens = r.get("batch_input_tokens", 0)
+            batch_output_tokens = r.get("batch_output_tokens", 0)
+            cost = (estimate_cost_usd(model_for_estimate, input_tokens, output_tokens,
+                                       is_batch=False)
+                    + estimate_cost_usd(model_for_estimate, batch_input_tokens,
+                                         batch_output_tokens, is_batch=True))
+            result.append({
+                "date": r.get("date"),
+                "calls": r.get("calls", 0) + r.get("batch_calls", 0),
+                "sequential_calls": r.get("calls", 0),
+                "batch_calls": r.get("batch_calls", 0),
+                "input_tokens": input_tokens + batch_input_tokens,
+                "output_tokens": output_tokens + batch_output_tokens,
+                "estimated_cost_usd": round(cost, 4),
+            })
+        result.sort(key=lambda r: r["date"], reverse=True)
+        return result
 
     def record(self, model: str, input_tokens: int, output_tokens: int,
                is_batch: bool = False) -> None:
@@ -144,13 +224,24 @@ class AICostTracker:
         try:
             if self._cache_path.exists():
                 data = json.loads(self._cache_path.read_text(encoding="utf-8"))
-                if data.get("date") == self._date_str:
+                cached_date = data.get("date")
+                if cached_date == self._date_str:
                     self._calls = data.get("calls", 0)
                     self._input_tokens = data.get("input_tokens", 0)
                     self._output_tokens = data.get("output_tokens", 0)
                     self._batch_calls = data.get("batch_calls", 0)
                     self._batch_input_tokens = data.get("batch_input_tokens", 0)
                     self._batch_output_tokens = data.get("batch_output_tokens", 0)
+                elif cached_date:
+                    # A restart landed on a new day before the prior day's totals
+                    # were ever rolled over (_roll_if_new_day never got a chance to
+                    # fire) -- settle that stale day into history now rather than
+                    # silently discarding real recorded usage.
+                    self._append_history_row(
+                        cached_date, data.get("calls", 0), data.get("input_tokens", 0),
+                        data.get("output_tokens", 0), data.get("batch_calls", 0),
+                        data.get("batch_input_tokens", 0), data.get("batch_output_tokens", 0),
+                    )
         except Exception as e:
             logger.debug("AICostTracker._load failed (non-fatal): %s", e)
 
