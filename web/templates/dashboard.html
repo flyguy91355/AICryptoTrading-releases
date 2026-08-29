@@ -699,6 +699,40 @@ async function showAssetModal(ticker) {
 
     const sections = [];
     const addSection = (title, body) => { if (body) sections.push(`<div class="asset-modal-section"><div class="asset-modal-section-title">${title}</div><div class="asset-modal-section-body">${body}</div></div>`); };
+
+    // "Why AI Bought This" (2026-08-21 on the backend, frontend rendering added
+    // 2026-08-29 -- same feature as AITrading/AIShortTrading's own; a snapshot of
+    // the AI's real buy-time decision (Position.buy_thesis/buy_reasoning/
+    // buy_conviction/buy_signal/buy_rr/buy_required_rr/buy_fair_value), already
+    // present synchronously on `pos` -- no extra fetch needed. Shown ahead of the
+    // current live report sections since it's a frozen snapshot, not the ongoing
+    // re-analysis. Blank for a position opened before this feature existed --
+    // shows nothing rather than a misleading empty box.
+    if (pos && (pos.buy_thesis || pos.buy_reasoning)) {
+      const rrLine = (pos.buy_rr != null && pos.buy_required_rr != null)
+        ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:12px;">
+             <span style="color:var(--text-muted);">R/R at open:</span>
+             <strong style="color:${pos.buy_rr >= pos.buy_required_rr ? 'var(--green)' : 'var(--text-primary)'}">${pos.buy_rr.toFixed(2)}</strong>
+             <span style="color:var(--text-muted);">against a required</span>
+             <strong>${pos.buy_required_rr.toFixed(2)}</strong>
+             ${pos.buy_fair_value != null ? `&nbsp;·&nbsp; <span style="color:var(--text-muted);">fair value</span> <strong>${fmtUsd(pos.buy_fair_value)}</strong> <span style="color:var(--text-muted);">vs. entry</span> <strong>${fmtUsd(pos.entry_price)}</strong>` : ''}
+           </div>`
+        : '';
+      const convSigLine = (pos.buy_conviction != null || pos.buy_signal)
+        ? `<div style="margin-bottom:6px;font-size:11px;">
+             ${pos.buy_signal ? `<span style="color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.3px;">${pos.buy_signal}</span>` : ''}
+             ${pos.buy_conviction != null ? `<span style="color:var(--text-muted);"> · Conviction ${pos.buy_conviction}/10</span>` : ''}
+           </div>`
+        : '';
+      sections.push(`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin:14px 0;">
+        <div style="font-size:10px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Why AI Bought This</div>
+        ${convSigLine}
+        ${pos.buy_thesis ? `<div style="font-size:13px;color:var(--text-primary);line-height:1.6;margin-bottom:6px;">${pos.buy_thesis}</div>` : ''}
+        ${pos.buy_reasoning ? `<div style="font-size:12.5px;color:var(--text-secondary);line-height:1.6;">${pos.buy_reasoning}</div>` : ''}
+        ${rrLine}
+      </div>`);
+    }
+
     if (r) {
       addSection('Asset Summary', r.asset_summary);
       addSection('Thesis', r.thesis);
