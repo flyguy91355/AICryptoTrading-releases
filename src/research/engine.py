@@ -24,7 +24,9 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 
-from src.data.market_data import MarketDataFetcher, format_long_term_trend_summary
+from src.data.market_data import (
+    MarketDataFetcher, format_long_term_trend_summary, format_technical_summary,
+)
 from src.data.news_feed import NewsFeed
 from src.research.asset_profile import build_asset_profile_section
 from src.research.sentiment import SentimentAnalyzer
@@ -325,14 +327,7 @@ class ResearchEngine:
             logger.warning("gather_analysis_inputs failed for %s: %s", ticker, e)
             return None
 
-        technical_summary = (
-            f"Price: ${_fmt_price(quote.price)} | 24h change: {quote.change_pct:+.2f}% | "
-            f"SMA50: ${_fmt_price(technicals.sma_50)} | SMA200: ${_fmt_price(technicals.sma_200)} | "
-            f"RSI: {technicals.rsi:.1f} | Support: ${_fmt_price(technicals.support_level)} | "
-            f"Resistance: ${_fmt_price(technicals.resistance_level)} | "
-            f"Avg Volume 30d: {technicals.avg_volume_30d:,} | "
-            f"30d Realized Vol: {technicals.realized_vol_30d*100:.0f}% annualized"
-        )
+        technical_summary = format_technical_summary(quote.price, quote.change_pct, technicals)
         return {
             "current_price": quote.price,
             "technical_summary": technical_summary,

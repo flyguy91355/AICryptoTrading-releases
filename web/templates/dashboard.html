@@ -538,6 +538,151 @@ function rollingSma(points, period) {
   return out;
 }
 
+// MACD/ADX/volume-trend chart series (2026-08-29, ported from AITrading/
+// AIShortTrading same day) -- client-side ports of the exact same math as
+// src/data/market_data.py's _compute_macd/_compute_adx/_compute_obv_trend_pct,
+// computed as a FULL time series here from the same OHLCV points array already
+// used for rollingSma above, so no backend/API change was needed.
+function _ema(values, period) {
+  if (values.length === 0) return [];
+  const alpha = 2 / (period + 1);
+  const out = new Array(values.length);
+  out[0] = values[0];
+  for (let i = 1; i < values.length; i++) out[i] = alpha * values[i] + (1 - alpha) * out[i - 1];
+  return out;
+}
+function _rollingMean(values, period) {
+  const out = new Array(values.length).fill(null);
+  for (let i = period - 1; i < values.length; i++) {
+    const window = values.slice(i - period + 1, i + 1);
+    if (window.some(v => v == null)) continue;
+    out[i] = window.reduce((a, b) => a + b, 0) / period;
+  }
+  return out;
+}
+function computeMacdSeries(points, fast = 12, slow = 26, signal = 9) {
+  if (points.length < slow + signal) return { line: [], signalLine: [], histogram: [] };
+  const closes = points.map(p => p.close);
+  const emaFast = _ema(closes, fast);
+  const emaSlow = _ema(closes, slow);
+  const macdVals = closes.map((_, i) => emaFast[i] - emaSlow[i]);
+  const signalVals = _ema(macdVals, signal);
+  const line = [], signalLine = [], histogram = [];
+  for (let i = 0; i < points.length; i++) {
+    line.push({ time: points[i].time, value: macdVals[i] });
+    signalLine.push({ time: points[i].time, value: signalVals[i] });
+    const h = macdVals[i] - signalVals[i];
+    histogram.push({ time: points[i].time, value: h, color: h >= 0 ? 'rgba(16,185,129,0.6)' : 'rgba(239,68,68,0.6)' });
+  }
+  return { line, signalLine, histogram };
+}
+function computeAdxSeries(points, period = 14) {
+  const n = points.length;
+  if (n < period * 2) return [];
+  const highs = points.map(p => p.high);
+  const lows = points.map(p => p.low);
+  const closes = points.map(p => p.close);
+  const plusDM = new Array(n).fill(0);
+  const minusDM = new Array(n).fill(0);
+  const tr = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    const upMove = highs[i] - highs[i - 1];
+    const downMove = lows[i - 1] - lows[i];
+    plusDM[i] = (upMove > downMove && upMove > 0) ? upMove : 0;
+    minusDM[i] = (downMove > upMove && downMove > 0) ? downMove : 0;
+    tr[i] = Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1]));
+  }
+  const trSmooth = _rollingMean(tr, period);
+  const plusDMSmooth = _rollingMean(plusDM, period);
+  const minusDMSmooth = _rollingMean(minusDM, period);
+  const dx = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (trSmooth[i] == null) continue;
+    if (trSmooth[i] === 0) { dx[i] = 0; continue; }
+    const plusDI = 100 * plusDMSmooth[i] / trSmooth[i];
+    const minusDI = 100 * minusDMSmooth[i] / trSmooth[i];
+    const diSum = plusDI + minusDI;
+    dx[i] = diSum !== 0 ? 100 * Math.abs(plusDI - minusDI) / diSum : 0;
+  }
+  const adxSmooth = _rollingMean(dx, period);
+  const out = [];
+  for (let i = 0; i < n; i++) if (adxSmooth[i] != null) out.push({ time: points[i].time, value: adxSmooth[i] });
+  return out;
+}
+function computeObvTrendSeries(points, lookback = 20) {
+  const n = points.length;
+  if (n < lookback + 1) return [];
+  const signedVolume = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    const dir = points[i].close > points[i - 1].close ? 1 : (points[i].close < points[i - 1].close ? -1 : 0);
+    signedVolume[i] = dir * points[i].volume;
+  }
+  const out = [];
+  for (let i = lookback; i < n; i++) {
+    let sumSigned = 0, sumTotal = 0;
+    for (let j = i - lookback + 1; j <= i; j++) { sumSigned += signedVolume[j]; sumTotal += points[j].volume; }
+    if (sumTotal === 0) continue;
+    out.push({ time: points[i].time, value: sumSigned / sumTotal * 100 });
+  }
+  return out;
+}
+
+// Per-device overlay toggle preferences (2026-08-29, owner request: "choose
+// between the technicals on the chart itself... any amount too"). SMA
+// fast/slow/support-resistance/volume default ON (zero visual regression on
+// first load); MACD/ADX/volume-trend default OFF (brand new, opt-in).
+const CHART_OVERLAY_DEFAULTS = {
+  smaFast: true, smaSlow: true, supportResistance: true, volume: true,
+  macd: false, adx: false, obvTrend: false,
+};
+const CHART_OVERLAY_TOGGLES = [
+  { key: 'smaFast', label: 'SMA Fast' },
+  { key: 'smaSlow', label: 'SMA Slow' },
+  { key: 'supportResistance', label: 'Support/Resistance' },
+  { key: 'volume', label: 'Volume' },
+  { key: 'macd', label: 'MACD' },
+  { key: 'adx', label: 'ADX' },
+  { key: 'obvTrend', label: 'Volume Trend' },
+];
+function getChartOverlayPrefs() {
+  try {
+    return Object.assign({}, CHART_OVERLAY_DEFAULTS, JSON.parse(localStorage.getItem('chartOverlayPrefs') || '{}'));
+  } catch (e) { return Object.assign({}, CHART_OVERLAY_DEFAULTS); }
+}
+function setChartOverlayPref(key, value) {
+  const prefs = getChartOverlayPrefs();
+  prefs[key] = value;
+  try { localStorage.setItem('chartOverlayPrefs', JSON.stringify(prefs)); } catch (e) {}
+}
+function toggleChartOverlay(containerId, legendId, key) {
+  const el = document.getElementById(containerId);
+  if (!el || !el._lastChartArgs) return;
+  const prefs = getChartOverlayPrefs();
+  setChartOverlayPref(key, !prefs[key]);
+  const a = el._lastChartArgs;
+  renderDetailedAssetChart(containerId, legendId, a.points, a.technicals, a.refLines, a.fastPeriod, a.slowPeriod);
+}
+function _ensureOverlayToggleRow(legendEl, containerId) {
+  let row = document.getElementById(containerId + '-toggles');
+  if (!row) {
+    row = document.createElement('div');
+    row.id = containerId + '-toggles';
+    row.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;';
+    legendEl.parentElement.insertBefore(row, legendEl);
+  }
+  return row;
+}
+function _renderOverlayToggleRow(row, containerId, legendId, prefs) {
+  row.innerHTML = CHART_OVERLAY_TOGGLES.map(t => {
+    const on = prefs[t.key];
+    return `<button onclick="toggleChartOverlay('${containerId}','${legendId}','${t.key}')" ` +
+      `style="font-size:10px;padding:2px 8px;border-radius:10px;cursor:pointer;` +
+      `border:1px solid ${on ? 'var(--accent)' : 'var(--border)'};` +
+      `background:${on ? 'rgba(59,130,246,0.15)' : 'transparent'};` +
+      `color:${on ? 'var(--accent)' : 'var(--text-muted)'};">${t.label}</button>`;
+  }).join('');
+}
+
 // The detailed per-asset modal chart: real candlesticks, volume, rolling SMA overlays,
 // and price lines for every level that actually drives the buy decision
 // (entry/stop/take-profit/fair-value/support/resistance) -- everything the tiny card
@@ -553,6 +698,10 @@ function renderDetailedAssetChart(containerId, legendId, points, technicals, ref
     chartInstances[containerId].remove();
     delete chartInstances[containerId];
   }
+  if (el) el._lastChartArgs = { points, technicals, refLines, fastPeriod, slowPeriod };
+  const toggleRow = _ensureOverlayToggleRow(legendEl, containerId);
+  const prefs = getChartOverlayPrefs();
+  _renderOverlayToggleRow(toggleRow, containerId, legendId, prefs);
   legendEl.innerHTML = '';
   if (!el || typeof LightweightCharts === 'undefined' || !points || points.length < 2) {
     if (el) el.innerHTML = '<div class="empty" style="padding:60px 0;">No price history available</div>';
@@ -565,38 +714,89 @@ function renderDetailedAssetChart(containerId, legendId, points, technicals, ref
     layout: { background: { color: 'transparent' }, textColor: isDark ? '#9ca3af' : '#4b5563' },
     grid: { vertLines: { color: isDark ? '#1f2937' : '#e5e7eb' }, horzLines: { color: isDark ? '#1f2937' : '#e5e7eb' } },
     rightPriceScale: { borderColor: isDark ? '#2a3a4e' : '#d8dee6' },
+    leftPriceScale: { visible: true, borderColor: isDark ? '#2a3a4e' : '#d8dee6' },
     timeScale: { borderColor: isDark ? '#2a3a4e' : '#d8dee6', timeVisible: false, rightOffset: 8 },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
   });
+
+  // Sub-panes stack bottom-up as each is toggled on, each a fixed 15% slice of the
+  // chart's total height; the price panel takes whatever's left above them -- same
+  // technique the volume histogram already used on its own.
+  const SLICE = 0.15;
+  let bottomUsed = 0;
+  let volumeMargins = null, macdMargins = null, oscMargins = null;
+  if (prefs.volume) { volumeMargins = { top: 1 - SLICE - bottomUsed, bottom: bottomUsed }; bottomUsed += SLICE; }
+  if (prefs.macd) { macdMargins = { top: 1 - SLICE - bottomUsed, bottom: bottomUsed }; bottomUsed += SLICE; }
+  if (prefs.adx || prefs.obvTrend) { oscMargins = { top: 1 - SLICE - bottomUsed, bottom: bottomUsed }; bottomUsed += SLICE; }
 
   const candleSeries = chart.addCandlestickSeries({
     upColor: '#10b981', downColor: '#ef4444', borderVisible: false,
     wickUpColor: '#10b981', wickDownColor: '#ef4444',
     priceScaleId: 'right',
   });
-  candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.22 } });
+  candleSeries.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: bottomUsed + 0.04 } });
   candleSeries.setData(points.map(p => ({ time: p.time, open: p.open, high: p.high, low: p.low, close: p.close })));
 
-  const volSeries = chart.addHistogramSeries({
-    priceFormat: { type: 'volume' }, priceScaleId: 'vol',
-    color: isDark ? '#374151' : '#c5ccd6',
-  });
-  volSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-  volSeries.setData(points.map(p => ({
-    time: p.time, value: p.volume,
-    color: p.close >= p.open ? 'rgba(16,185,129,0.5)' : 'rgba(239,68,68,0.5)',
-  })));
-
   const legend = [];
-  const smaFastData = rollingSma(points, fastPeriod);
-  if (smaFastData.length) {
-    chart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(smaFastData);
-    legend.push(['#f59e0b', `SMA ${fastPeriod}`]);
+  if (prefs.volume) {
+    const volSeries = chart.addHistogramSeries({
+      priceFormat: { type: 'volume' }, priceScaleId: 'vol',
+      color: isDark ? '#374151' : '#c5ccd6',
+    });
+    volSeries.priceScale().applyOptions({ scaleMargins: volumeMargins });
+    volSeries.setData(points.map(p => ({
+      time: p.time, value: p.volume,
+      color: p.close >= p.open ? 'rgba(16,185,129,0.5)' : 'rgba(239,68,68,0.5)',
+    })));
   }
-  const smaSlowData = rollingSma(points, slowPeriod);
-  if (smaSlowData.length) {
-    chart.addLineSeries({ color: '#8b5cf6', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(smaSlowData);
-    legend.push(['#8b5cf6', `SMA ${slowPeriod}`]);
+  if (prefs.smaFast) {
+    const smaFastData = rollingSma(points, fastPeriod);
+    if (smaFastData.length) {
+      chart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(smaFastData);
+      legend.push(['#f59e0b', `SMA ${fastPeriod}`]);
+    }
+  }
+  if (prefs.smaSlow) {
+    const smaSlowData = rollingSma(points, slowPeriod);
+    if (smaSlowData.length) {
+      chart.addLineSeries({ color: '#8b5cf6', lineWidth: 1.5, priceScaleId: 'right', priceLineVisible: false, lastValueVisible: false }).setData(smaSlowData);
+      legend.push(['#8b5cf6', `SMA ${slowPeriod}`]);
+    }
+  }
+  if (prefs.macd && macdMargins) {
+    const macd = computeMacdSeries(points);
+    if (macd.line.length) {
+      const histSeries = chart.addHistogramSeries({ priceScaleId: 'macd', priceLineVisible: false, lastValueVisible: false });
+      histSeries.priceScale().applyOptions({ scaleMargins: macdMargins });
+      histSeries.setData(macd.histogram);
+      chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceScaleId: 'macd', priceLineVisible: false, lastValueVisible: false }).setData(macd.line);
+      chart.addLineSeries({ color: '#f97316', lineWidth: 1, priceScaleId: 'macd', priceLineVisible: false, lastValueVisible: false }).setData(macd.signalLine);
+      legend.push(['#3b82f6', 'MACD']);
+    }
+  }
+  if (prefs.adx && oscMargins) {
+    const adxSeries = computeAdxSeries(points);
+    if (adxSeries.length) {
+      // Own dedicated priceScaleId ('adx'), NOT 'right' -- that's the candlesticks'
+      // own scale, and applying oscMargins to a shared scale clobbers the price
+      // panel's own margins (a real bug found and fixed on the stock siblings'
+      // port of this same feature).
+      const s = chart.addLineSeries({ color: '#eab308', lineWidth: 1.5, priceScaleId: 'adx', priceLineVisible: false, lastValueVisible: false });
+      s.priceScale().applyOptions({ scaleMargins: oscMargins });
+      s.setData(adxSeries);
+      legend.push(['#eab308', 'ADX']);
+    }
+  }
+  if (prefs.obvTrend && oscMargins) {
+    const obvSeries = computeObvTrendSeries(points);
+    if (obvSeries.length) {
+      const s = chart.addLineSeries({ color: '#06b6d4', lineWidth: 1.5, priceScaleId: 'left', priceLineVisible: false, lastValueVisible: false });
+      s.priceScale().applyOptions({ scaleMargins: oscMargins });
+      s.setData(obvSeries);
+      legend.push(['#06b6d4', 'Volume Trend']);
+    }
+  } else {
+    chart.applyOptions({ leftPriceScale: { visible: false } });
   }
 
   // Magnitude-aware price formatter — same logic as engine.py's _fmt_price.
@@ -622,7 +822,7 @@ function renderDetailedAssetChart(containerId, legendId, points, technicals, ref
     (refLines.takeProfits || []).forEach((tp, i) => priceLine(tp, '#10b981', `TP${i + 1}`));
     priceLine(refLines.fairValue, '#06b6d4', 'Fair Value');
   }
-  if (technicals) {
+  if (technicals && prefs.supportResistance) {
     priceLine(technicals.support_level, isDark ? '#6b7280' : '#9ca3af', 'Support');
     priceLine(technicals.resistance_level, isDark ? '#6b7280' : '#9ca3af', 'Resistance');
   }

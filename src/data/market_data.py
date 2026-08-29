@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
+import pandas as pd
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,21 @@ def _round_price(price: float) -> float:
     return round(price, decimals)
 
 
+def _fmt_price(price: float) -> str:
+    """String-formatting sibling of _round_price above, for prompt/display use
+    (2026-08-29) -- same magnitude-aware decimal-place logic (mirrors engine.py's
+    own private _fmt_price, duplicated here rather than cross-module imported
+    since both are small, module-local formatters). Avoids relying on Python's
+    default float-to-str, which can render a tiny sub-cent price in scientific
+    notation instead of a readable decimal."""
+    if price == 0.0:
+        return "0.00"
+    if abs(price) >= 0.01:
+        return f"{price:.2f}"
+    decimals = max(2, -math.floor(math.log10(abs(price))) + 3)
+    return f"{price:.{decimals}f}"
+
+
 def to_yfinance_symbol(alpaca_symbol: str) -> str:
     """Converts this project's canonical Alpaca-format symbol ("BTC/USD") to
     yfinance's own format ("BTC-USD"). Pure string transform for the overwhelming
@@ -92,6 +108,11 @@ class TechnicalIndicators:
     support_level: float = 0.0
     resistance_level: float = 0.0
     realized_vol_30d: float = 0.0   # annualized 30-day daily-return std dev, e.g. 0.85 = 85%
+    macd_line: float = 0.0
+    macd_signal: float = 0.0
+    macd_histogram: float = 0.0
+    adx: float = 0.0
+    obv_trend_pct: float = 0.0
 
 
 @dataclass
@@ -140,6 +161,43 @@ def format_long_term_trend_summary(trend: LongTermTrend) -> str:
         f"High ${trend.high:.2f} ({trend.high_date}) | Current ${trend.current_price:.2f} "
         f"is {pct_off_high:+.1f}% vs the {trend.years}yr high and "
         f"{pct_off_low:+.1f}% vs the {trend.years}yr low."
+    )
+
+
+def format_technical_summary(price: float, quote_change_pct: float, technicals: "TechnicalIndicators") -> str:
+    """Pure formatter -- the single shared source for the "TECHNICAL CONTEXT" prompt
+    section (2026-08-29, ported from AITrading/AIShortTrading the same day -- see
+    those projects' CLAUDE_HISTORY.md 2026-08-29 entries for the full design
+    rationale, including the market-context-section incident this framing
+    deliberately avoids repeating). Uses _fmt_price throughout (not a plain
+    :.2f) since crypto prices routinely fall below $0.01 (SHIB, PEPE, etc.).
+
+    The added MACD/ADX/OBV line and the confluence instruction are deliberately
+    NEUTRAL and METHODOLOGY-ONLY -- they teach Claude HOW to weigh multiple
+    technical signals together, but never state or imply WHAT the current
+    numbers already mean. See tests/test_technical_summary_format.py's own
+    regression-lock test, which asserts no bullish/bearish/favorable-flavored
+    word can ever appear in this function's output, for any input."""
+    obv_sign = "+" if technicals.obv_trend_pct >= 0 else ""
+    return (
+        f"Price: ${_fmt_price(price)} | 24h change: {quote_change_pct:+.2f}% | "
+        f"SMA50: ${_fmt_price(technicals.sma_50)} | SMA200: ${_fmt_price(technicals.sma_200)} | "
+        f"RSI: {technicals.rsi:.1f} | Support: ${_fmt_price(technicals.support_level)} | "
+        f"Resistance: ${_fmt_price(technicals.resistance_level)} | "
+        f"Avg Volume 30d: {technicals.avg_volume_30d:,} | "
+        f"30d Realized Vol: {technicals.realized_vol_30d*100:.0f}% annualized\n"
+        f"MACD: line {_fmt_price(technicals.macd_line)}, signal {_fmt_price(technicals.macd_signal)}, "
+        f"histogram {_fmt_price(technicals.macd_histogram)} (histogram = line minus signal) | "
+        f"ADX: {technicals.adx:.1f} (trend strength, 0-100 scale; higher = stronger "
+        f"trend, regardless of direction) | "
+        f"20-Day Volume Trend: {obv_sign}{technicals.obv_trend_pct:.1f}% "
+        f"(positive = net buying volume, negative = net selling volume)\n"
+        f"Read MACD, ADX, and the volume trend together, not independently: weigh a "
+        f"reading more heavily when multiple of these point the same direction, and "
+        f"treat a single indicator moving alone -- or any signal during a weak trend "
+        f"(low ADX) -- with more caution. If they conflict, treat the technical "
+        f"picture as genuinely mixed rather than picking whichever one supports a "
+        f"preferred conclusion."
     )
 
 
@@ -241,6 +299,8 @@ class MarketDataFetcher:
         daily_returns = closes.pct_change().dropna()
         vol_30d = float(daily_returns.tail(30).std() * (365 ** 0.5)) if len(daily_returns) >= 10 else 0.0
 
+        macd_line, macd_signal, macd_histogram = self._compute_macd(closes)
+
         return TechnicalIndicators(
             ticker=ticker,
             sma_50=_round_price(sma_50),
@@ -250,6 +310,11 @@ class MarketDataFetcher:
             support_level=_round_price(support_level),
             resistance_level=_round_price(resistance_level),
             realized_vol_30d=round(vol_30d, 4),
+            macd_line=_round_price(macd_line),
+            macd_signal=_round_price(macd_signal),
+            macd_histogram=_round_price(macd_histogram),
+            adx=round(self._compute_adx(hist), 2),
+            obv_trend_pct=round(self._compute_obv_trend_pct(closes, volumes), 2),
         )
 
     async def get_long_term_trend(
@@ -290,3 +355,74 @@ class MarketDataFetcher:
 
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
+
+    @staticmethod
+    def _compute_macd(closes, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[float, float, float]:
+        """Standard MACD (2026-08-29, ported from AITrading/AIShortTrading same day) --
+        fast/slow EMA line, its own signal-line EMA, and their difference (histogram).
+        Complements SMA/RSI/realized-vol with a momentum-divergence signal none of
+        those capture. Returns (0.0, 0.0, 0.0) when there isn't enough history for
+        the signal line's own EMA to have a real seed."""
+        if len(closes) < slow + signal:
+            return (0.0, 0.0, 0.0)
+        ema_fast = closes.ewm(span=fast, adjust=False).mean()
+        ema_slow = closes.ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        histogram = macd_line - signal_line
+        return (float(macd_line.iloc[-1]), float(signal_line.iloc[-1]), float(histogram.iloc[-1]))
+
+    @staticmethod
+    def _compute_adx(hist, period: int = 14) -> float:
+        """Average Directional Index -- trend STRENGTH, not direction (2026-08-29,
+        ported from AITrading/AIShortTrading same day). Uses simple rolling-mean
+        smoothing for +DM/-DM/TR and the final DX average, matching this file's own
+        RSI/realized-vol simplification style over strict recursive Wilder
+        smoothing. Needs roughly 2*period bars; returns 0.0 when there isn't enough
+        history, or a period has zero directional movement (a 0/0 DX)."""
+        if len(hist) < period * 2:
+            return 0.0
+        high = hist["High"]
+        low = hist["Low"]
+        close = hist["Close"]
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = ((up_move > down_move) & (up_move > 0)) * up_move
+        minus_dm = ((down_move > up_move) & (down_move > 0)) * down_move
+        prev_close = close.shift(1)
+        true_range = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ], axis=1).max(axis=1)
+
+        tr_smooth = true_range.rolling(period).mean()
+        plus_dm_smooth = plus_dm.rolling(period).mean()
+        minus_dm_smooth = minus_dm.rolling(period).mean()
+
+        plus_di = 100 * plus_dm_smooth / tr_smooth
+        minus_di = 100 * minus_dm_smooth / tr_smooth
+        di_sum = plus_di + minus_di
+        dx = (100 * (plus_di - minus_di).abs() / di_sum).where(di_sum != 0, 0.0)
+
+        adx = dx.rolling(period).mean()
+        result = adx.iloc[-1]
+        return float(result) if not pd.isna(result) else 0.0
+
+    @staticmethod
+    def _compute_obv_trend_pct(closes, volumes, lookback: int = 20) -> float:
+        """On-Balance Volume, expressed as net signed volume over the lookback
+        window as a % of total volume traded in that window (2026-08-29, ported
+        from AITrading/AIShortTrading same day) -- NOT raw OBV's own % change (a
+        known-bad metric: OBV's cumulative level is arbitrary/path-dependent).
+        Bounded [-100, 100], comparable across assets regardless of OBV's own
+        cumulative history. Returns 0.0 when there isn't enough history, or the
+        window's total volume is zero."""
+        if len(closes) < lookback + 1:
+            return 0.0
+        direction = closes.diff().apply(lambda x: 1.0 if x > 0 else (-1.0 if x < 0 else 0.0))
+        signed_volume = (direction * volumes).tail(lookback)
+        total_volume = volumes.tail(lookback).sum()
+        if total_volume == 0:
+            return 0.0
+        return float(signed_volume.sum() / total_volume * 100)
