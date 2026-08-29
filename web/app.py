@@ -54,6 +54,17 @@ logger = logging.getLogger(__name__)
 _DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 _SESSION_SECRET_KEY = os.environ.get("SESSION_SECRET_KEY", "dev-only-insecure-key")
 
+# 2026-08-28, audit finding, same class already diagnosed and fixed on the sibling
+# stock projects ("SQLite Concurrency Hardening") -- Portfolio (aiosqlite, async) and
+# this file's own ai_log persistence (raw sqlite3, sync-via-thread) both write to the
+# same physical DB file with no coordination, and this project has MORE concurrent
+# writers hitting that one file than either sibling did at the time of their own
+# incident (ai_log and portfolio state aren't even separated into different files
+# here). WAL mode lets a reader and a single writer proceed without blocking each
+# other; the widened timeout is defense-in-depth even under WAL, which still only
+# allows one writer at a time.
+_SQLITE_TIMEOUT_SECS = 20.0
+
 
 def _default_take_profit_targets(entry_price: float, tp_cfg: dict) -> list[float]:
     """Config-percentage-based T1/T2/T3 ladder (2026-08-20, LINK/USD incident) -- same
@@ -227,6 +238,19 @@ class DashboardState:
         # cooldown dicts above -- a lock has no meaning to persist across a restart.
         self._act_on_report_locks: dict[str, asyncio.Lock] = {}
 
+        # Cross-ticker cash reservation (2026-08-28, audit finding, same GitHub #44
+        # bug class already fixed on the sibling stock projects) -- the per-ticker
+        # lock above only serializes the SAME ticker; it does nothing to stop two
+        # DIFFERENT tickers' buy decisions (scan_loop, watching_loop, and
+        # event_scan_loop are independent asyncio tasks) from each reading the same
+        # stale portfolio.cash and both passing check_cash_reserve before either one
+        # actually debits cash. _reserved_cash tracks dollars already committed to a
+        # buy that's still in flight; the authoritative check right before
+        # execute_buy subtracts it from cash so a second concurrent buy sees the
+        # first one's reservation even though real cash hasn't moved yet.
+        self._reserved_cash: float = 0.0
+        self._cash_reservation_lock = asyncio.Lock()
+
         # Near-miss watchlist (2026-08-17): assets above watch_floor_conviction but
         # below the buy gate -- re-scanned every watch_interval_minutes by watching_loop
         # so a strengthening setup is caught quickly. In-memory only; repopulated by
@@ -305,7 +329,7 @@ class DashboardState:
     def _init_log_db(self):
         import sqlite3
         Path(self._log_db_path).parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self._log_db_path) as conn:
+        with sqlite3.connect(self._log_db_path, timeout=_SQLITE_TIMEOUT_SECS) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ai_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,7 +344,7 @@ class DashboardState:
 
     def _load_log_from_db(self) -> list[dict]:
         import sqlite3
-        with sqlite3.connect(self._log_db_path) as conn:
+        with sqlite3.connect(self._log_db_path, timeout=_SQLITE_TIMEOUT_SECS) as conn:
             rows = conn.execute(
                 "SELECT time, phase, content, level FROM ai_log ORDER BY id DESC LIMIT 300"
             ).fetchall()
@@ -329,7 +353,7 @@ class DashboardState:
     def _persist_log_entry(self, entry: dict):
         import sqlite3
         try:
-            with sqlite3.connect(self._log_db_path) as conn:
+            with sqlite3.connect(self._log_db_path, timeout=_SQLITE_TIMEOUT_SECS) as conn:
                 conn.execute(
                     "INSERT INTO ai_log (time, phase, content, level, created_at) VALUES (?, ?, ?, ?, ?)",
                     (entry["time"], entry["phase"], entry["content"], entry["level"], datetime.now().isoformat()),
@@ -706,21 +730,42 @@ class DashboardState:
                     f"AI report had no take-profit targets — using config-based "
                     f"fallback ladder: {[f'${t:.4f}' for t in tp_targets]}", "WARNING")
 
-            ok = await self.order_manager.execute_buy(
-                ticker, name, signal.entry_price, signal.stop_loss,
-                tp_targets, signal.position_size_dollars,
-                signal.final_trail_pct, signal=signal,
-            )
-            if ok:
-                self.watching_candidates.pop(ticker, None)
-                self.add_log(
-                    ticker,
-                    f"BUY executed — ${signal.position_size_dollars:.2f} "
-                    f"(conviction {signal.conviction}/10)",
+            # Cross-ticker cash reservation (2026-08-28, audit finding) -- the
+            # per-ticker lock above can't stop a DIFFERENT ticker's concurrent buy
+            # decision from reading the same stale portfolio.cash. This is the
+            # authoritative, final check right before spending real money: it
+            # subtracts every other buy currently reserved-but-not-yet-debited so
+            # two concurrent buys can't jointly overspend past the reserve floor.
+            async with self._cash_reservation_lock:
+                available = self.portfolio.cash - self._reserved_cash
+                reserve_floor = self.portfolio.total_value * self.risk_manager.min_cash_reserve_pct
+                if available - signal.position_size_dollars < reserve_floor:
+                    self.add_log(
+                        ticker,
+                        "BUY skipped — insufficient cash reserve once other in-flight "
+                        "buys are accounted for", "WARNING",
+                    )
+                    return
+                self._reserved_cash += signal.position_size_dollars
+
+            try:
+                ok = await self.order_manager.execute_buy(
+                    ticker, name, signal.entry_price, signal.stop_loss,
+                    tp_targets, signal.position_size_dollars,
+                    signal.final_trail_pct, signal=signal,
                 )
-                await self.broadcast({"type": "portfolio", "portfolio": self.get_portfolio_snapshot()})
-            else:
-                self.add_log(ticker, "BUY signal qualified but order execution failed", "ERROR")
+                if ok:
+                    self.watching_candidates.pop(ticker, None)
+                    self.add_log(
+                        ticker,
+                        f"BUY executed — ${signal.position_size_dollars:.2f} "
+                        f"(conviction {signal.conviction}/10)",
+                    )
+                    await self.broadcast({"type": "portfolio", "portfolio": self.get_portfolio_snapshot()})
+                else:
+                    self.add_log(ticker, "BUY signal qualified but order execution failed", "ERROR")
+            finally:
+                self._reserved_cash -= signal.position_size_dollars
 
     async def _run_sequential_scan(self):
         """Original per-ticker path -- safety net for when the batch API is
@@ -1233,8 +1278,28 @@ app.add_middleware(
 )
 
 
+def _ensure_wal_mode(db_path: str) -> None:
+    """Switches the shared SQLite database to WAL (write-ahead log) journal mode,
+    once, at every startup (2026-08-28, audit finding -- ported from the sibling
+    stock projects' own "SQLite Concurrency Hardening" fix). WAL mode is a property
+    of the database FILE itself (stored in its header), not the connection --
+    setting it once here covers every connection this app opens afterward
+    (aiosqlite in portfolio.py, sync sqlite3 in this file's own ai_log
+    persistence), regardless of which module's connection happens to open the file
+    first. Idempotent and cheap to call unconditionally on every startup."""
+    import sqlite3
+    conn = sqlite3.connect(db_path, timeout=_SQLITE_TIMEOUT_SECS)
+    try:
+        row = conn.execute("PRAGMA journal_mode=WAL;").fetchone()
+        logger.info("Database journal mode: %s (%s)", row[0] if row else "?", db_path)
+    finally:
+        conn.close()
+
+
 @app.on_event("startup")
 async def startup():
+    Path(state.portfolio.db_path).parent.mkdir(parents=True, exist_ok=True)
+    _ensure_wal_mode(state.portfolio.db_path)
     await state.portfolio.initialize()
     try:
         await state.order_manager.connect()

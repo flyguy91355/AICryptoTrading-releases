@@ -259,7 +259,14 @@ class Portfolio:
 
     async def initialize(self):
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(self.db_path)
+        # 2026-08-28, audit finding, same class already fixed on the sibling stock
+        # projects ("SQLite Concurrency Hardening") -- widened past sqlite3's
+        # implicit 5.0s default as defense-in-depth against lock contention from
+        # this file's other writer (web/app.py's ai_log persistence, raw sqlite3
+        # on a background thread). WAL mode itself is set once at app startup via
+        # web/app.py's _ensure_wal_mode, since it's a property of the DB file, not
+        # any one connection.
+        self._db = await aiosqlite.connect(self.db_path, timeout=20.0)
 
         await self._db.execute("""
             CREATE TABLE IF NOT EXISTS positions (

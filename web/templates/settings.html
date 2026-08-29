@@ -44,9 +44,52 @@ main { padding: 22px; max-width: 900px; margin: 0 auto; }
 .field-row { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start;
   padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .field-row:last-child { border-bottom: none; }
-.field-label { font-size: 13px; font-weight: 600; padding-top: 7px; }
-.field-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
-.field-input-wrap { display: flex; flex-direction: column; }
+.field-label { font-size: 13px; font-weight: 600; padding-top: 7px; display: flex; align-items: center; gap: 6px; }
+.field-input-wrap { display: flex; align-items: center; gap: 10px; }
+
+/* Info button + popup, default-value label (2026-08-25, owner report --
+   "there ar no default numbers like we have in aitrading and shorting.
+   there are also no info icom at each setting descibing what it is") --
+   ported from AITrading/AIShortTrading's settings.html, adapted to this
+   page's own field-row layout and color tokens (no --yellow token exists
+   here, so --accent is used instead). Each field's existing desc string
+   (previously an always-visible line under the input) now shows behind a
+   click-to-reveal "i" icon instead, matching the other two projects. */
+.info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 9px;
+  font-style: italic;
+  font-weight: 700;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+  line-height: 1;
+}
+.info-btn:hover { border-color: var(--accent-hover); color: var(--accent-hover); }
+#info-popup {
+  display: none;
+  position: fixed;
+  z-index: 500;
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 14px;
+  max-width: 300px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+#info-popup.active { display: block; }
+.default-label { font-size: 11px; color: var(--text-muted); text-align: center; white-space: nowrap; }
+.default-val { font-size: 11px; color: var(--text-muted); font-weight: 600; }
 input[type=number], input[type=text], select {
   background: var(--bg-input); border: 1px solid var(--border-light); color: var(--text-primary);
   border-radius: 6px; padding: 7px 10px; font-size: 13px; width: 220px; font-variant-numeric: tabular-nums;
@@ -116,6 +159,8 @@ button.save-btn:disabled { opacity: .5; cursor: default; }
     <span id="saveStatus"></span>
   </div>
 </main>
+
+<div id="info-popup"></div>
 
 <script>
 // Each entry: [section, key, label, type, description, options?]
@@ -216,6 +261,68 @@ const FIELD_GROUPS = [
   },
 ];
 
+// Snapshotted 2026-08-25 from the live settings.yaml, matching AITrading/
+// AIShortTrading's own settings.html precedent -- these are no longer factory
+// baselines, they're a frozen copy of the values that were live and working
+// well at the time of the snapshot. Deliberately static: editing a setting
+// later does NOT move its own "default" -- this only changes if the snapshot
+// is intentionally redone.
+const DEFAULTS = {
+  'risk_tier.value': 90.0,
+  'trading.auto_execute': 'true',
+  'scan.interval_minutes': 180,
+  'portfolio.max_positions': 8,
+  'risk_management.max_position_pct': 15.0,
+  'risk_management.max_loss_per_trade_pct': 2.96,
+  'risk_management.min_cash_reserve_pct': 12.0,
+  'risk_management.daily_loss_limit_pct': 11.84,
+  'risk_management.drawdown_halt_pct': 11.84,
+  'risk_management.drawdown_defensive_pct': 15.0,
+  'risk_management.drawdown_exit_review_pct': 25.0,
+  'risk_management.trailing_stop_follow_tp_targets': 'true',
+  'take_profit.stop_loss_pct': 17.76,
+  'take_profit.t1_pct': 11.84,
+  'take_profit.t2_pct': 23.68,
+  'take_profit.t3_pct': 41.44,
+  'take_profit.final_tranche_trail_pct': 1.5,
+  'research.min_conviction_score': 4.0,
+  'research.min_risk_reward_ratio': 1.1,
+  'research.rr_conviction_step': 0.1,
+  'research.rr_floor': 1.5,
+  'research.long_term_trend_years': 3,
+  'research.model_quick_scan': 'claude-haiku-4-5',
+  'research.sma_mode': 'auto',
+  'research.sma_fast_period': 50,
+  'research.sma_slow_period': 200,
+  'research.ai_chosen_stop_tp_enabled': 'true',
+  'research.ai_stop_loss_min_pct': 4.0,
+  'research.ai_stop_loss_max_pct': 18.0,
+  'research.ai_final_trail_min_pct': 0.5,
+  'research.ai_final_trail_max_pct': 5.0,
+};
+
+function escInfo(s) {
+  // Safe to embed inside `onclick="showInfo(event,'...')"` -- the outer
+  // attribute is double-quoted and the JS string literal inside it is
+  // single-quoted, so both need escaping (a raw apostrophe in a desc string,
+  // e.g. "Claude's conviction...", would otherwise terminate the JS string
+  // early and break the onclick handler).
+  return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+function showInfo(evt, text) {
+  evt.stopPropagation();
+  const pop = document.getElementById('info-popup');
+  pop.textContent = text;
+  const rect = evt.target.getBoundingClientRect();
+  const left = Math.min(rect.right + 10, window.innerWidth - 320);
+  const top  = Math.min(Math.max(8, rect.top - 20), window.innerHeight - 220);
+  pop.style.left = left + 'px';
+  pop.style.top  = top + 'px';
+  pop.classList.add('active');
+}
+document.addEventListener('click', () => document.getElementById('info-popup').classList.remove('active'));
+
 function setTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem('theme', theme);
@@ -226,6 +333,19 @@ let currentConfig = {};
 
 function fieldId(section, key) { return `f_${section}_${key}`; }
 
+function formatDefaultVal(dotkey, type) {
+  // Auto-formats DEFAULTS' raw value for display, rather than hand-typing a
+  // display string per field the way AITrading/AIShortTrading's own
+  // hand-written settings.html rows do -- this page's fields are entirely
+  // data-table-driven, so generating the label from the same DEFAULTS source
+  // used for the raw value keeps the two from ever drifting apart.
+  if (!(dotkey in DEFAULTS)) return null;
+  const v = DEFAULTS[dotkey];
+  if (type === 'bool') return v === 'true' ? 'On' : 'Off';
+  if (typeof v === 'number' && dotkey.endsWith('_pct')) return `${v}%`;
+  return String(v);
+}
+
 function renderFields() {
   const container = document.getElementById('fields');
   container.innerHTML = FIELD_GROUPS.map(group => `
@@ -234,7 +354,11 @@ function renderFields() {
       <div class="field-grid">
         ${group.fields.map(([section, key, label, type, desc, options]) => {
           const id = fieldId(section, key);
+          const dotkey = `${section}.${key}`;
           const value = (currentConfig[section] || {})[key];
+          const infoBtn = desc
+            ? ` <button type="button" class="info-btn" onclick="showInfo(event,'${escInfo(desc)}')">i</button>`
+            : '';
           let inputHtml;
           if (type === 'bool') {
             inputHtml = `<select id="${id}"><option value="true" ${value ? 'selected' : ''}>Enabled</option><option value="false" ${!value ? 'selected' : ''}>Disabled</option></select>`;
@@ -258,13 +382,25 @@ function renderFields() {
                   <tr><td>Daily loss limit</td><td id="rtpDaily">--</td></tr>
                 </tbody>
               </table>`;
+            // No default-label for the slider itself -- its own live preview
+            // table already shows real computed values, a more useful
+            // reference than a static "default: 90" hint next to a control
+            // whose whole point is to move away from any one fixed value.
+            return `<div class="field-row">
+              <div class="field-label">${label}${infoBtn}</div>
+              <div class="field-input-wrap" style="flex-direction:column;align-items:flex-start;">${inputHtml}</div>
+            </div>`;
           } else {
             const step = type === 'int' ? '1' : 'any';
             inputHtml = `<input type="number" step="${step}" id="${id}" value="${value !== undefined ? value : ''}">`;
           }
+          const defaultVal = formatDefaultVal(dotkey, type);
+          const defaultHtml = defaultVal !== null
+            ? `<div class="default-label">default<br><span class="default-val">${defaultVal}</span></div>`
+            : '';
           return `<div class="field-row">
-            <div class="field-label">${label}</div>
-            <div class="field-input-wrap">${inputHtml}<div class="field-desc">${desc}</div></div>
+            <div class="field-label">${label}${infoBtn}</div>
+            <div class="field-input-wrap">${inputHtml}${defaultHtml}</div>
           </div>`;
         }).join('')}
       </div>

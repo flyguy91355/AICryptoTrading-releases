@@ -347,6 +347,30 @@ class OrderManager:
         for ticker, pos in list(self.portfolio.positions.items()):
             async with self._lock_for(ticker):
                 if pos.current_price <= pos.entry_price:
+                    if ticker not in self._stop_order_ids:
+                        # No stop order is tracked at all for a losing/flat position
+                        # -- e.g. the buy-time placement in execute_buy failed, or
+                        # tracking was lost across a restart (2026-08-28, audit
+                        # finding). The plain "not yet profitable" skip just below
+                        # used to apply here too, meaning a position that never got
+                        # a stop in the first place had NO remediation path until it
+                        # became profitable -- which, for a genuinely declining
+                        # asset, could be never. A profitable position with no
+                        # tracked stop is NOT handled here -- the ratchet logic
+                        # below already places one correctly via its own
+                        # existing_id-falsy fallback.
+                        new_id = await self._place_stop_order(ticker, pos.shares, pos.stop_loss)
+                        if new_id:
+                            self._stop_order_ids[ticker] = new_id
+                            logger.info(
+                                "sync_exit_orders: placed missing stop for %s at $%.6f",
+                                ticker, pos.stop_loss,
+                            )
+                        else:
+                            logger.error(
+                                "sync_exit_orders: still unable to place missing stop "
+                                "for %s -- will retry next cycle", ticker,
+                            )
                     continue  # not yet in profit -- ride the plain stop_loss, no trailing yet
 
                 start_pct = derive_stop_pct(pos.entry_price, pos.stop_loss, default_stop_pct)

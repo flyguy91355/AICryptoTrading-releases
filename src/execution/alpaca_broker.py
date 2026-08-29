@@ -26,6 +26,7 @@ from datetime import datetime
 import alpaca_trade_api as tradeapi
 
 from src.execution.broker import Broker, Order, OrderSide, OrderType, OrderStatus, AccountInfo
+from src.data.market_data import _round_price
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +192,11 @@ class AlpacaBroker(Broker):
         elif order.order_type == OrderType.LIMIT:
             kwargs["type"] = "limit"
             kwargs["time_in_force"] = "gtc"
-            kwargs["limit_price"] = str(round(order.limit_price, 2))
+            # 2026-08-28, audit finding: a flat round(price, 2) silently zeroes out a
+            # sub-cent price (SHIB, PEPE etc.) entirely -- _round_price (already used
+            # elsewhere in this codebase for the identical class of asset) keeps
+            # meaningful precision regardless of magnitude instead.
+            kwargs["limit_price"] = str(_round_price(order.limit_price))
 
         elif order.order_type == OrderType.STOP:
             # Confirmed against Alpaca's own docs before writing this file: crypto only
@@ -203,13 +208,20 @@ class AlpacaBroker(Broker):
             # added to this broker class.
             kwargs["type"] = "stop"
             kwargs["time_in_force"] = "gtc"
-            kwargs["stop_price"] = str(round(order.stop_price, 2))
+            kwargs["stop_price"] = str(_round_price(order.stop_price))
 
         elif order.order_type == OrderType.STOP_LIMIT:
             kwargs["type"] = "stop_limit"
             kwargs["time_in_force"] = "gtc"
-            kwargs["stop_price"] = str(round(order.stop_price, 2))
-            kwargs["limit_price"] = str(round(order.limit_price, 2))
+            # Same sub-cent fix as the LIMIT branch above. Note this does NOT fully
+            # close the audit finding's own DOGE example (a thin 0.5% STOP_LIMIT
+            # buffer collapsing at prices already >= $0.01, where _round_price's
+            # threshold still rounds to 2 decimals) -- that would need Alpaca's own
+            # real crypto price-precision limits verified before widening precision
+            # further, per this project's standing rule to confirm against Alpaca's
+            # docs before changing order-placement code. Tracked as still open.
+            kwargs["stop_price"] = str(_round_price(order.stop_price))
+            kwargs["limit_price"] = str(_round_price(order.limit_price))
 
         elif order.order_type == OrderType.TRAILING_STOP:
             # Not currently supported by Alpaca for crypto (verify before ever using --
@@ -276,9 +288,9 @@ class AlpacaBroker(Broker):
             qty_str = str(round(qty, 9)).rstrip("0").rstrip(".") if qty % 1 else str(int(qty))
             kwargs["qty"] = qty_str or "0"
         if stop_price is not None:
-            kwargs["stop_price"] = str(round(stop_price, 2))
+            kwargs["stop_price"] = str(_round_price(stop_price))
         if limit_price is not None:
-            kwargs["limit_price"] = str(round(limit_price, 2))
+            kwargs["limit_price"] = str(_round_price(limit_price))
         try:
             result = await self._call_with_rate_limit_retry(
                 lambda: self.api.replace_order(broker_order_id, **kwargs))
