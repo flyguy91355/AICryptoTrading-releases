@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -1392,6 +1392,72 @@ def _read_settings_snapshot() -> dict:
 @app.get("/api/settings")
 async def get_settings():
     return _read_settings_snapshot()
+
+
+_AVAILABLE_MODELS_PATH = Path("data/available_models.json")
+_MODEL_DIAL_DEFAULTS = {
+    # Mirrors settings.html's DEFAULTS -- kept selectable so Reset always works.
+    "model_quick_scan": "claude-haiku-4-5",
+}
+
+
+def _write_available_models_cache(obj: dict) -> None:
+    tmp = _AVAILABLE_MODELS_PATH.with_name(f"{_AVAILABLE_MODELS_PATH.name}.{os.getpid()}.tmp")
+    try:
+        _AVAILABLE_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(obj), encoding="utf-8")
+        os.replace(tmp, _AVAILABLE_MODELS_PATH)
+    except Exception as e:
+        logger.warning("Failed to save available models cache: %s", e)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+async def _available_models() -> list[dict]:
+    """Model list for the Settings model dropdown (2026-10-13, ported from AITrading,
+    see src/research/model_catalog.py). Serves data/available_models.json; refreshes
+    it from the free Models API when older than model_catalog.MAX_AGE_HOURS. A failed
+    refresh keeps the old cache (or FALLBACK_MODELS if there is none) and retries on
+    the next Settings load."""
+    from src.research import model_catalog
+    cached: dict = {}
+    try:
+        if _AVAILABLE_MODELS_PATH.exists():
+            cached = json.loads(_AVAILABLE_MODELS_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Unreadable %s, refetching: %s", _AVAILABLE_MODELS_PATH, e)
+    models = cached.get("models") or []
+    client = getattr(state.research_engine, "client", None)
+    if client is not None and (not models or model_catalog.catalog_is_stale(cached.get("fetched_at"))):
+        try:
+            fresh = await asyncio.wait_for(
+                asyncio.to_thread(model_catalog.fetch_available_models,
+                                  client.with_options(timeout=8.0, max_retries=0)),
+                timeout=10.0,
+            )
+            if fresh:
+                models = fresh
+                await asyncio.to_thread(_write_available_models_cache, {
+                    "fetched_at": datetime.now(timezone.utc).isoformat(), "models": fresh})
+        except Exception as e:
+            logger.warning("Models API refresh failed, using %s model list: %s",
+                           "cached" if models else "built-in fallback", e)
+    return models or model_catalog.FALLBACK_MODELS
+
+
+@app.get("/api/model-options")
+async def get_model_options():
+    """Dropdown options per model dial: {key: [{id, label, selected}]}. Read-only;
+    the only network call is the free, at-most-daily Models API refresh."""
+    from src.research.model_catalog import build_model_options
+    models = await _available_models()
+    research_cfg = state.config.get("research", {})
+    out = {}
+    for key, default in _MODEL_DIAL_DEFAULTS.items():
+        current = research_cfg.get(key) or default
+        out[key] = [{**opt, "selected": opt["id"] == current}
+                    for opt in build_model_options(models, current, default)]
+    return out
 
 
 @app.get("/api/risk-tier-preview")

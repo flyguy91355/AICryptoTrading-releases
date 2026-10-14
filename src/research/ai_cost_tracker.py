@@ -13,24 +13,51 @@ Claude Haiku 4.5 is $1/M input tokens, $5/M output tokens at the standard
 (non-batch) rate; the Batch API is a documented flat 50% discount on both. This
 is an ESTIMATE, not Anthropic's real billing figure -- there is no API access to
 actual billing from this codebase -- and does not account for prompt-cache
-discounts. A model name not found in PRICING_PER_MILLION falls back to a
-conservative mid-tier estimate rather than silently reporting $0, since
-under-reporting is the worse failure mode for a cost-visibility feature."""
+discounts. A model name not found in PRICING_PER_MILLION falls back to the
+most expensive known model of its family (haiku/sonnet/opus/fable), else a
+conservative mid-tier estimate, rather than silently reporting $0, since
+under-reporting is the worse failure mode for a cost-visibility feature.
+
+Table extended 2026-10-13 when the Settings dropdowns started listing models
+live from the Models API (src/research/model_catalog.py): any selectable model
+should price correctly here. Prices from Anthropic's published per-model rates;
+the old sonnet-5 ($3/$15) and opus-5 ($15/$75) rows were wrong and corrected."""
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from src.research.model_catalog import model_family
+
 logger = logging.getLogger(__name__)
 
 PRICING_PER_MILLION = {
+    "claude-haiku-5-5": (0.10, 0.50),
     "claude-haiku-4-5": (1.00, 5.00),
-    "claude-sonnet-5": (3.00, 15.00),
-    "claude-opus-5": (15.00, 75.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-opus-5-5": (4.00, 20.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-opus-4-8": (5.00, 25.00),
+    "claude-opus-4-7": (5.00, 25.00),
+    "claude-opus-4-6": (5.00, 25.00),
+    "claude-fable-5-1": (10.00, 50.00),
+    "claude-fable-5": (10.00, 50.00),
 }
 _DEFAULT_PRICING = (3.00, 15.00)  # conservative mid-tier fallback for an unrecognized model
 BATCH_DISCOUNT = 0.5
+
+
+def _pricing_for(model: str) -> tuple[float, float]:
+    """Exact table hit, else the priciest known model of the same family (a new
+    release in a family shouldn't under-report), else _DEFAULT_PRICING."""
+    if model in PRICING_PER_MILLION:
+        return PRICING_PER_MILLION[model]
+    fam = model_family(model)
+    same_family = [p for m, p in PRICING_PER_MILLION.items() if fam and model_family(m) == fam]
+    return max(same_family) if same_family else _DEFAULT_PRICING
 
 
 def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int,
@@ -40,7 +67,7 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int,
     counts rather than raising."""
     if input_tokens < 0 or output_tokens < 0:
         return 0.0
-    in_price, out_price = PRICING_PER_MILLION.get(model, _DEFAULT_PRICING)
+    in_price, out_price = _pricing_for(model)
     cost = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
     return cost * BATCH_DISCOUNT if is_batch else cost
 

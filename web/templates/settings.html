@@ -230,8 +230,8 @@ const FIELD_GROUPS = [
       ["research", "long_term_trend_years", "Long-Term Trend Years", "int",
         "Years of price history used to judge a genuine breakout vs. a bounce toward an old high/low."],
       ["research", "model_quick_scan", "Research Model", "select",
-        "Which Claude model runs every scan-cycle analysis.",
-        ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]],
+        "Which Claude model runs every scan-cycle analysis. The list comes live from Anthropic (refreshed daily), so new models appear without a program update.",
+        ["claude-haiku-4-5"]],  // fallback only -- /api/model-options supplies the real list
     ],
   },
   {
@@ -363,7 +363,13 @@ function renderFields() {
           if (type === 'bool') {
             inputHtml = `<select id="${id}"><option value="true" ${value ? 'selected' : ''}>Enabled</option><option value="false" ${!value ? 'selected' : ''}>Disabled</option></select>`;
           } else if (type === 'select') {
-            inputHtml = `<select id="${id}">${options.map(o => `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+            // Model dials (2026-10-13): server-built {id, label, selected} list from
+            // /api/model-options, which always includes the current value; static
+            // string options (and the model fallback) render as before.
+            const dyn = modelOptions[key];
+            inputHtml = dyn && dyn.length
+              ? `<select id="${id}">${dyn.map(o => `<option value="${escAttr(o.id)}" ${o.selected ? 'selected' : ''}>${escAttr(o.label)}</option>`).join('')}</select>`
+              : `<select id="${id}">${(value && !options.includes(value) ? [value, ...options] : options).map(o => `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
           } else if (type === 'range') {
             inputHtml = `
               <input type="range" min="0" max="100" step="1" id="${id}" value="${value !== undefined ? value : 50}" oninput="onRiskTierSlide(this.value)">
@@ -437,9 +443,19 @@ async function fetchRiskTierPreview(value) {
   }
 }
 
+let modelOptions = {};
+
+function escAttr(v) {
+  return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 async function loadSettings() {
-  const resp = await fetch('/api/settings');
+  const [resp, models] = await Promise.all([
+    fetch('/api/settings'),
+    fetch('/api/model-options').then(r => r.ok ? r.json() : {}).catch(() => ({})),
+  ]);
   currentConfig = await resp.json();
+  modelOptions = models || {};
   renderFields();
   const riskTierValue = (currentConfig.risk_tier || {}).value;
   if (riskTierValue !== undefined) fetchRiskTierPreview(riskTierValue);
